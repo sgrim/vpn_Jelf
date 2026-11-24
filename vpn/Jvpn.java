@@ -25,7 +25,7 @@ public class Jvpn {
     System.out.println("órdenes: version, help, genkey, pubkey ARCHIVO, selftest, up, probe, listen, cookie-probe");
     System.out.println("  genkey                      escribe una clave privada nueva (base64, como «wg genkey»)");
     System.out.println("  pubkey ARCHIVO              escribe la clave pública de la privada que hay en ARCHIVO");
-    System.out.println("  up CONFIG --tun NOMBRE [--user UID] [--force-cookies] [-v]");
+    System.out.println("  up CONFIG --tun NOMBRE [--user UID] [--persist] [--force-cookies] [-v]");
     System.out.println("      túnel con varios pares entre la interfaz TUN y UDP; CONFIG es un subconjunto del formato de wg-quick (IPv4) con permisos 0600; hace falta CAP_NET_ADMIN para crear la TUN y --user suelta los privilegios después");
     System.out.println("  probe ARCHIVO PUB_PAR IPv4:PUERTO ORIGEN DESTINO [N]   apretón de manos con el par y N pings (ICMP) por el túnel de ORIGEN a DESTINO");
     System.out.println("  listen ARCHIVO PUB_PAR PUERTO DIRECCION [N]             responde apretones de manos y contesta N pings dirigidos a DIRECCION (0 = sin fin)");
@@ -104,9 +104,11 @@ public class Jvpn {
     String tunName = null;
     int uid = -1;
     long max = 0;
+    boolean persist = false;
     Tunnel t = new Tunnel();
     for (int i = 2; i < a.length; i++) {
       if (a[i].equals("-v")) t.verbose = true;
+      else if (a[i].equals("--persist")) persist = true;
       else if (a[i].equals("--force-cookies")) t.forceCookies = true;
       else if (i + 1 >= a.length) bad("falta el valor de " + a[i]);
       else if (a[i].equals("--tun")) tunName = a[++i];
@@ -130,9 +132,21 @@ public class Jvpn {
     if (t.udp < 0) bad("no se pudo abrir el socket UDP (error " + (-t.udp) + ")");
     t.tun = Tun.open(tunName);
     if (t.tun < 0) bad("no se pudo crear la interfaz TUN «" + tunName + "» (error " + (-t.tun) + "; hace falta CAP_NET_ADMIN y /dev/net/tun)");
+    boolean root = Sys.syscall(Os.GETUID) == 0;
+    if (c.fwmark != 0) {
+      if (Udp.setMark(t.udp, c.fwmark) < 0) bad("no se pudo poner FwMark " + c.fwmark + " al socket (hace falta CAP_NET_ADMIN)");
+    }
+    if (persist) {
+      if (!root) bad("--persist hace la interfaz persistente y eso exige privilegios; relance sin --persist para reabrir una interfaz que ya sea persistente");
+      if (uid > 0 && Tun.setOwner(t.tun, uid) < 0) bad("no se pudo dar la interfaz al usuario " + uid);
+      if (Tun.setPersist(t.tun, true) < 0) bad("no se pudo hacer persistente la interfaz");
+      System.out.println(NAME + ": interfaz PERSISTENTE: si jvpn cae, sus rutas siguen y el tráfico se pierde en vez de salir por otra ruta");
+    }
     Tun.setBlocking(t.tun, false);
     System.out.println(NAME + ": interfaz " + Tun.name + " creada, UDP " + Udp.localPort(t.udp) + ", " + c.peerCount + " par(es)");
-    if (uid > 0) {
+    if (!root) {
+      System.out.println(NAME + ": ya corre sin privilegios (uid " + Sys.syscall(Os.GETUID) + "); se unió a una interfaz que lo permite");
+    } else if (uid > 0) {
       if (!Tun.dropPrivileges(uid, uid)) bad("no se pudieron soltar los privilegios (uid " + uid + ")");
       System.out.println(NAME + ": privilegios soltados (uid " + uid + ")");
     } else {

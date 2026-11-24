@@ -11,3 +11,13 @@
 ./test.sh    # reglas, pruebas propias del protocolo (22) y la prueba contra el WireGuard del kernel (docker; tools/wg_oracle.sh) y la de tráfico real por la TUN (tools/tun_oracle.sh)
 jvpn genkey > k; jvpn pubkey k          # claves como «wg genkey» y «wg pubkey»
 ```
+
+## Túnel completo con interruptor de seguridad
+
+```
+# wg.conf: FwMark = 51820, [Peer] AllowedIPs = 0.0.0.0/0
+jvpn up wg.conf --tun jt0 --user 65534 --persist &      # con privilegios: crea la interfaz persistente, pone la marca y los suelta
+ip addr add 10.9.0.2/24 dev jt0 && ip link set jt0 up mtu 1420
+tools/fullroute.sh up jt0 51820                          # todo el tráfico sin marca va por el túnel
+```
+Si `jvpn` muere, la interfaz y su ruta siguen y el tráfico se pierde (no sale en claro). Límites y qué no está probado (IPv6, DNS, la ventana al arrancar): `AUDITORIA.md` 6.

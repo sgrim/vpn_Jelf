@@ -13,6 +13,7 @@ Tamaños relativos: S < M < L < XL. Los riesgos de cada fase y su validación es
 - `jvpn genkey`, `pubkey`, `up CONFIG`, `show`, `set`; interfaz TUN, socket UDP, soltar privilegios antes del primer paquete, archivo de configuración con permisos 0600.
 
 ## 3. V2 — rutas, DNS y tamaños (M): HECHOS varios pares, archivo de configuración y enrutamiento por clave (AUDITORIA.md 5); falta lo que sigue
+- **Interruptor de seguridad y túnel completo: HECHOS (AUDITORIA.md 6)**; falta probar IPv6 y DNS, y cerrar la ventana entre crear la interfaz y poner las rutas.
 - Política de rutas IPv4 e IPv6, DNS por el túnel, interruptor si el túnel cae, MTU 1420.
 
 ## 4. V3 — rendimiento (L)

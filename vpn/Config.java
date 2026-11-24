@@ -31,6 +31,8 @@ public final class Config {
 
   public byte[] privateKey;
   public int listenPort;
+  /** SO_MARK de los paquetes UDP del túnel (0 = sin marca): una regla de rutas «not fwmark N» deja pasar por el túnel todo MENOS estos paquetes. */
+  public int fwmark;
   public PeerConf[] peers = new PeerConf[4];
   public int peerCount;
   public StringBuilder warnings = new StringBuilder();
@@ -42,7 +44,7 @@ public final class Config {
   }
 
   static boolean ignoredKey(String k) {
-    return k.equals("address") || k.equals("dns") || k.equals("mtu") || k.equals("table") || k.equals("preup") || k.equals("postup") || k.equals("predown") || k.equals("postdown") || k.equals("saveconfig") || k.equals("fwmark");
+    return k.equals("address") || k.equals("dns") || k.equals("mtu") || k.equals("table") || k.equals("preup") || k.equals("postup") || k.equals("predown") || k.equals("postdown") || k.equals("saveconfig");
   }
 
   /** Agrega una ruta CIDR IPv4 ("10.0.0.0/24") al par; false si no es válida. */
@@ -163,6 +165,13 @@ public final class Config {
             return;
           }
           listenPort = p;
+        } else if (k.equals("fwmark")) {
+          int mk = v.equals("off") ? 0 : (v.startsWith("0x") ? parseHex(v.substring(2)) : parseInt(v, 2147483647));
+          if (mk < 0) {
+            fail(line, "FwMark debe ser un número (decimal o 0x...) o off");
+            return;
+          }
+          fwmark = mk;
         } else if (ignoredKey(k)) {
           warnings.append("jvpn: AVISO: línea " + line + ": «" + l.substring(0, eq).trim() + "» no se aplica (configure la dirección, las rutas y el DNS con «ip»)\n");
         } else {
@@ -257,6 +266,18 @@ public final class Config {
         }
       }
     }
+  }
+
+  static int parseHex(String s) {
+    if (s.length() == 0 || s.length() > 8) return -1;
+    long v = 0;
+    for (int i = 0; i < s.length(); i++) {
+      char ch = s.charAt(i);
+      int d = ch >= '0' && ch <= '9' ? ch - '0' : (ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : (ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1));
+      if (d < 0) return -1;
+      v = v * 16 + d;
+    }
+    return v > 2147483647L ? -1 : (int) v;
   }
 
   static int parseInt(String s, int max) {
