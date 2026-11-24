@@ -57,6 +57,10 @@ public final class Ip {
     return (p[20] & 255) == type && p[21] == 0 ? total : -1;
   }
 
+  public static String str(int ip) {
+    return ((ip >>> 24) & 255) + "." + ((ip >>> 16) & 255) + "." + ((ip >>> 8) & 255) + "." + (ip & 255);
+  }
+
   public static int addr(String s) {
     int v = 0;
     int part = 0;

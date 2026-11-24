@@ -25,8 +25,8 @@ public class Jvpn {
     System.out.println("órdenes: version, help, genkey, pubkey ARCHIVO, selftest, up, probe, listen, cookie-probe");
     System.out.println("  genkey                      escribe una clave privada nueva (base64, como «wg genkey»)");
     System.out.println("  pubkey ARCHIVO              escribe la clave pública de la privada que hay en ARCHIVO");
-    System.out.println("  up ARCHIVO PUB_PAR --tun NOMBRE --allowed IPv4/BITS [--endpoint IPv4:PUERTO] [--listen PUERTO] [--keepalive SEG] [--user UID] [-v]");
-    System.out.println("      túnel de un par entre la interfaz TUN y UDP (hace falta CAP_NET_ADMIN para crearla; --user suelta los privilegios después)");
+    System.out.println("  up CONFIG --tun NOMBRE [--user UID] [--force-cookies] [-v]");
+    System.out.println("      túnel con varios pares entre la interfaz TUN y UDP; CONFIG es un subconjunto del formato de wg-quick (IPv4) con permisos 0600; hace falta CAP_NET_ADMIN para crear la TUN y --user suelta los privilegios después");
     System.out.println("  probe ARCHIVO PUB_PAR IPv4:PUERTO ORIGEN DESTINO [N]   apretón de manos con el par y N pings (ICMP) por el túnel de ORIGEN a DESTINO");
     System.out.println("  listen ARCHIVO PUB_PAR PUERTO DIRECCION [N]             responde apretones de manos y contesta N pings dirigidos a DIRECCION (0 = sin fin)");
   }
@@ -99,61 +99,39 @@ public class Jvpn {
     System.exit(2);
   }
 
-  static int parseCidr(String s, int[] out) {
-    int slash = s.indexOf('/');
-    if (slash < 0) return -1;
-    long ip = Net.parseIp(s.substring(0, slash));
-    int bits = Integer.parseInt(s.substring(slash + 1));
-    if (ip < 0 || bits < 0 || bits > 32) return -1;
-    out[1] = bits == 0 ? 0 : (int) (0xffffffffL << (32 - bits));
-    out[0] = (int) ip & out[1];
-    return 0;
-  }
-
   static void up(String[] a) {
-    if (a.length < 3) bad("uso: up ARCHIVO PUB_PAR --tun NOMBRE --allowed IPv4/BITS [--endpoint IPv4:PUERTO] [--listen PUERTO] [--keepalive SEG] [--user UID] [--max-packets N] [-v]");
-    byte[] priv = readKey(a[1]);
-    byte[] peer = peerKey(a[2]);
+    if (a.length < 2) bad("uso: up CONFIG --tun NOMBRE [--user UID] [--max-packets N] [--force-cookies] [-v]");
     String tunName = null;
-    String allowed = null;
-    String endpoint = null;
-    int listen = 0;
     int uid = -1;
     long max = 0;
     Tunnel t = new Tunnel();
-    for (int i = 3; i < a.length; i++) {
+    for (int i = 2; i < a.length; i++) {
       if (a[i].equals("-v")) t.verbose = true;
       else if (a[i].equals("--force-cookies")) t.forceCookies = true;
       else if (i + 1 >= a.length) bad("falta el valor de " + a[i]);
       else if (a[i].equals("--tun")) tunName = a[++i];
-      else if (a[i].equals("--allowed")) allowed = a[++i];
-      else if (a[i].equals("--endpoint")) endpoint = a[++i];
-      else if (a[i].equals("--listen")) listen = Integer.parseInt(a[++i]);
-      else if (a[i].equals("--keepalive")) t.keepaliveSec = Integer.parseInt(a[++i]);
       else if (a[i].equals("--user")) uid = Integer.parseInt(a[++i]);
       else if (a[i].equals("--max-packets")) max = Long.parseLong(a[++i]);
       else bad("opción desconocida «" + a[i] + "»");
     }
-    if (tunName == null || allowed == null) bad("faltan --tun y --allowed");
-    int[] net = new int[2];
-    if (parseCidr(allowed, net) < 0) bad("--allowed debe ser IPv4/BITS");
-    t.allowedNet = net[0];
-    t.allowedMask = net[1];
-    if (endpoint != null) {
-      int c = endpoint.indexOf(':');
-      long ip = c < 0 ? -1 : Net.parseIp(endpoint.substring(0, c));
-      if (ip < 0) bad("--endpoint debe ser IPv4:PUERTO");
-      t.peerIp = (int) ip;
-      t.peerPort = Integer.parseInt(endpoint.substring(c + 1));
-      t.haveEndpoint = true;
-    }
-    t.hs = new Handshake(priv, peer, psk());
-    t.udp = Udp.bind(0, listen, false);
+    if (tunName == null) bad("falta --tun NOMBRE");
+    File f = new File(a[1]);
+    if (!f.isFile() || f.length() > (1 << 20)) bad("no se puede leer la configuración «" + a[1] + "»");
+    if (Config.looseMode(a[1])) bad("la configuración «" + a[1] + "» guarda claves privadas y la pueden leer otros usuarios: use «chmod 600 " + a[1] + "»");
+    FileInputStream in = new FileInputStream(a[1]);
+    byte[] raw = in.readAllBytes();
+    in.close();
+    Config c = Config.parse(new String(raw, 0, raw.length));
+    for (int i = 0; i < raw.length; i++) raw[i] = 0;
+    if (c.error != null) bad("configuración inválida: " + c.error);
+    if (c.warnings.length() > 0) System.err.print(c.warnings.toString());
+    t.setup(c);
+    t.udp = Udp.bind(0, c.listenPort, false);
     if (t.udp < 0) bad("no se pudo abrir el socket UDP (error " + (-t.udp) + ")");
     t.tun = Tun.open(tunName);
     if (t.tun < 0) bad("no se pudo crear la interfaz TUN «" + tunName + "» (error " + (-t.tun) + "; hace falta CAP_NET_ADMIN y /dev/net/tun)");
     Tun.setBlocking(t.tun, false);
-    System.out.println(NAME + ": interfaz " + Tun.name + " creada, UDP " + Udp.localPort(t.udp));
+    System.out.println(NAME + ": interfaz " + Tun.name + " creada, UDP " + Udp.localPort(t.udp) + ", " + c.peerCount + " par(es)");
     if (uid > 0) {
       if (!Tun.dropPrivileges(uid, uid)) bad("no se pudieron soltar los privilegios (uid " + uid + ")");
       System.out.println(NAME + ": privilegios soltados (uid " + uid + ")");
@@ -162,7 +140,15 @@ public class Jvpn {
     }
     System.out.flush();
     t.run(max);
-    System.out.println(NAME + ": " + t.rxPackets + " paquetes entregados a la TUN, " + t.txPackets + " enviados, " + t.rxDropped + " descartados");
+    long rx = 0;
+    long tx = 0;
+    long dr = 0;
+    for (int i = 0; i < t.peerCount; i++) {
+      rx += t.peers[i].rxPackets;
+      tx += t.peers[i].txPackets;
+      dr += t.peers[i].dropped;
+    }
+    System.out.println(NAME + ": " + rx + " paquetes entregados a la TUN, " + tx + " enviados, " + dr + " descartados");
   }
 
   /**

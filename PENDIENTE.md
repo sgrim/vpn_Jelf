@@ -12,7 +12,7 @@ Tamaños relativos: S < M < L < XL. Los riesgos de cada fase y su validación es
 ## 2. V1 — la herramienta en modo usuario (L): HECHO el núcleo (AUDITORIA.md 3); faltan varios pares, archivo de configuración con permisos 0600, `show`/`set`, IPv6, cookies
 - `jvpn genkey`, `pubkey`, `up CONFIG`, `show`, `set`; interfaz TUN, socket UDP, soltar privilegios antes del primer paquete, archivo de configuración con permisos 0600.
 
-## 3. V2 — rutas, DNS y tamaños (M)
+## 3. V2 — rutas, DNS y tamaños (M): HECHOS varios pares, archivo de configuración y enrutamiento por clave (AUDITORIA.md 5); falta lo que sigue
 - Política de rutas IPv4 e IPv6, DNS por el túnel, interruptor si el túnel cae, MTU 1420.
 
 ## 4. V3 — rendimiento (L)

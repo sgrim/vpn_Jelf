@@ -25,7 +25,7 @@ out=$(timeout 30 build/jvpn probe $T/key "$(build/jvpn genkey | tr -d '\n' > $T/
 # 2b) COOKIES: el kernel bajo carga (inundado con iniciaciones falsas de MAC1 válido) contesta con respuestas de cookie; jvpn las abre (XChaCha20-Poly1305) y repite con MAC2 válido
 KIP=$(docker inspect -f "{{.NetworkSettings.Networks.bridge.IPAddress}}" $NAME)
 out=$(timeout 60 build/jvpn cookie-probe $T/key "$KPUB" $KIP:51820 20000 2>&1); rc=$?
-if [ $rc -ne 0 ]; then sleep 3; out=$(timeout 60 build/jvpn cookie-probe $T/key "$KPUB" $KIP:51820 60000 2>&1); rc=$?; fi
+for n in 60000 120000 200000; do [ $rc -eq 0 ] && break; sleep 4; out=$(timeout 90 build/jvpn cookie-probe $T/key "$KPUB" $KIP:51820 $n 2>&1); rc=$?; done
 [ $rc -eq 0 ] && echo "$out" | grep -q "cookie recibida y abierta" && echo "$out" | grep -q "el par aceptó la iniciación" && ok "COOKIES contra el kernel bajo carga: la respuesta de cookie (XChaCha20-Poly1305) se abre y con el MAC2 el kernel acepta la iniciación ($(echo "$out" | head -1 | sed "s/jvpn: //"))" || fail "cookies contra el kernel: rc=$rc $out"
 sleep 3
 # 3) el kernel INICIA: jvpn escucha y contesta

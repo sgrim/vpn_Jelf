@@ -6,12 +6,13 @@
  * sin autorización expresa y por escrito del autor. Ver el archivo LICENSE.
  */
 /*
- * Tunnel.java - «jvpn up»: un túnel WireGuard de UN par entre una interfaz TUN y un socket UDP, en modo usuario.
- *   TUN → UDP: cada paquete IPv4 cuyo destino esté en las direcciones permitidas del par se cifra y se envía a su punto final (sin sesión vigente se guarda el último paquete y se inicia el apretón de manos).
- *   UDP → TUN: cada mensaje de datos se abre con la sesión actual o la anterior; el paquete interior debe ser IPv4, con largo coherente y ORIGEN dentro de las direcciones permitidas (enrutamiento por clave
- *   criptográfica: sin esto un par autenticado podría suplantar cualquier origen), y entonces se escribe en la TUN. Todo lo que llega por UDP es hostil: nada se escribe en la TUN sin pasar la etiqueta.
- * Se crea la TUN y se enlaza el socket CON privilegios y después se sueltan (--user), antes de leer el primer paquete. Tiempos como WireGuard: renovar la sesión a los 120 s al enviar, no usar una de más de 180 s,
- * reintentar el apretón de manos cada 5 s hasta 3 veces. Límite de iniciaciones procesadas: 20 por segundo (cada una cuesta curvas elípticas; sin cookies, R-V02). IPv4 solamente (V2: IPv6).
+ * Tunnel.java - «jvpn up CONFIG»: un túnel WireGuard con VARIOS pares entre una interfaz TUN y un socket UDP, en modo usuario.
+ *   TUN → UDP: cada paquete IPv4 se envía al par cuya ruta (AllowedIPs) COINCIDE MÁS LARGO con el destino (enrutamiento por clave criptográfica); sin ninguna ruta, se descarta. Sin sesión vigente se guarda el último paquete
+ *   y se inicia el apretón de manos con ese par.
+ *   UDP → TUN: el mensaje de datos se atribuye al par por su índice receptor, se abre con su sesión actual o la anterior y el paquete interior debe ser IPv4, con largo coherente y ORIGEN dentro de las rutas de ESE par
+ *   (sin esto un par autenticado podría suplantar a otro o a cualquier origen). Una iniciación elige al par por la clave estática que descifra, que debe ser la de un par configurado.
+ * Todo lo que llega por UDP es hostil. Se crea la TUN y se enlaza el socket CON privilegios y después se sueltan (--user), antes de leer el primer paquete. Tiempos como WireGuard (renovar a los 120 s al enviar, no usar
+ * sesiones de más de 180 s, reintentos cada 5 s, hasta 3). Iniciaciones: solo se cuentan las de MAC1 válido, tope de 20 por segundo para todo el dispositivo y cookies cuando pasan de 5. IPv4 solamente.
  */
 
 public final class Tunnel {
@@ -21,41 +22,56 @@ public final class Tunnel {
   static final int MAX_ATTEMPTS = 3;
   static final int MAX_INITIATIONS_PER_SEC = 20;
 
-  Handshake hs;
+  /** El estado de un par. */
+  static final class Peer {
+    Config.PeerConf conf;
+    Handshake hs;
+    boolean haveEndpoint;
+    int ip;
+    int port;
+    Session cur;
+    long curSince;
+    Session prev;
+    boolean handshaking;
+    long handshakeSent;
+    int attempts;
+    byte[] queued;
+    int queuedLen;
+    long lastSend;
+    long rxPackets;
+    long txPackets;
+    long dropped;
+  }
+
+  Peer[] peers;
+  int peerCount;
+  byte[] sPub;
+  Cookies cookies = new Cookies();
   int udp;
   int tun;
-  int peerIp;
-  int peerPort;
-  boolean haveEndpoint;
-  int allowedNet;
-  int allowedMask;
   boolean verbose;
-  int keepaliveSec;
-  boolean forceCookies; // para las pruebas: se comporta como si siempre estuviera bajo carga
-
-  Session cur;
-  long curSince;
-  Session prev;
-  boolean handshaking;
-  long handshakeSent;
-  int attempts;
-  byte[] queued;
-  int queuedLen;
-  long lastSend;
+  boolean forceCookies;
   long secStart;
   int secCount;
-
-  // contadores
-  long rxPackets;
-  long txPackets;
-  long rxDropped;
 
   void log(String s) {
     if (verbose) System.err.println("jvpn: " + s);
   }
 
-  boolean inAllowed(int ip) {
-    return (ip & allowedMask) == allowedNet;
+  void setup(Config c) {
+    peerCount = c.peerCount;
+    peers = new Peer[peerCount];
+    for (int i = 0; i < peerCount; i++) {
+      Peer p = new Peer();
+      p.conf = c.peers[i];
+      p.hs = new Handshake(c.privateKey, p.conf.pub, p.conf.psk);
+      p.hs.cookies = cookies;
+      p.haveEndpoint = p.conf.hasEndpoint;
+      p.ip = p.conf.endpointIp;
+      p.port = p.conf.endpointPort;
+      peers[i] = p;
+    }
+    sPub = peers[0].hs.sPub;
   }
 
   static int ipAt(byte[] p, int off) {
@@ -70,167 +86,235 @@ public final class Tunnel {
     return total;
   }
 
-  void sendDatagram(byte[] m, int len) {
-    if (!haveEndpoint) return;
-    Udp.sendTo(udp, peerIp, peerPort, m, 0, len);
+  /** ¿La dirección está en alguna ruta del par? */
+  static boolean allowed(Peer p, int ip) {
+    for (int i = 0; i < p.conf.routes; i++) if ((ip & p.conf.masks[i]) == p.conf.nets[i]) return true;
+    return false;
   }
 
-  void startHandshake(long now) {
-    if (!haveEndpoint) return;
-    byte[] m = hs.createInitiation();
+  /** El par con la ruta más específica (máscara más larga) que contiene la dirección, o null. */
+  Peer route(int ip) {
+    Peer best = null;
+    long bestMask = -1;
+    for (int i = 0; i < peerCount; i++) {
+      Config.PeerConf c = peers[i].conf;
+      for (int r = 0; r < c.routes; r++) {
+        if ((ip & c.masks[r]) == c.nets[r]) {
+          long m = c.masks[r] & 0xffffffffL;
+          if (best == null || m > bestMask) {
+            best = peers[i];
+            bestMask = m;
+          }
+        }
+      }
+    }
+    return best;
+  }
+
+  void send(Peer p, byte[] m, int len) {
+    if (p.haveEndpoint) Udp.sendTo(udp, p.ip, p.port, m, 0, len);
+  }
+
+  void startHandshake(Peer p, long now) {
+    if (!p.haveEndpoint) return;
+    byte[] m = p.hs.createInitiation();
     if (m == null) return;
-    handshaking = true;
-    handshakeSent = now;
-    attempts++;
-    sendDatagram(m, m.length);
-    log("iniciación enviada (intento " + attempts + ")");
+    p.handshaking = true;
+    p.handshakeSent = now;
+    p.attempts++;
+    send(p, m, m.length);
+    log("iniciación enviada (intento " + p.attempts + ")");
   }
 
-  /** Cifra y envía un paquete con la sesión vigente; false si no hay una utilizable. */
-  boolean sendPacket(byte[] p, int len, long now) {
-    if (cur == null || now - curSince >= REJECT_AFTER_MS) {
-      cur = null;
+  boolean sendPacket(Peer p, byte[] pkt, int len, long now) {
+    if (p.cur == null || now - p.curSince >= REJECT_AFTER_MS) {
+      p.cur = null;
       return false;
     }
-    if (cur.initiator && now - curSince >= REKEY_AFTER_MS && !handshaking) {
-      attempts = 0;
-      startHandshake(now);
+    if (p.cur.initiator && now - p.curSince >= REKEY_AFTER_MS && !p.handshaking) {
+      p.attempts = 0;
+      startHandshake(p, now);
     }
-    byte[] m = cur.seal(p, len);
+    byte[] m = p.cur.seal(pkt, len);
     if (m == null) {
-      cur = null;
+      p.cur = null;
       return false;
     }
-    sendDatagram(m, m.length);
-    lastSend = now;
+    send(p, m, m.length);
+    p.lastSend = now;
     return true;
   }
 
   void onTun(byte[] buf, int n, long now) {
     int total = ipv4Length(buf, n);
-    if (total < 0) {
-      rxDropped++;
+    if (total < 0) return;
+    Peer p = route(ipAt(buf, 16));
+    if (p == null) return; // ningún par tiene esa ruta
+    if (sendPacket(p, buf, total, now)) {
+      p.txPackets++;
       return;
     }
-    if (!inAllowed(ipAt(buf, 16))) {
-      rxDropped++;
-      return;
-    }
-    if (sendPacket(buf, total, now)) {
-      txPackets++;
-      return;
-    }
-    // sin sesión: se guarda el último paquete y se inicia el apretón de manos
-    queued = new byte[total];
-    for (int i = 0; i < total; i++) queued[i] = buf[i];
-    queuedLen = total;
-    if (!handshaking) {
-      attempts = 0;
-      startHandshake(now);
+    p.queued = new byte[total];
+    for (int i = 0; i < total; i++) p.queued[i] = buf[i];
+    p.queuedLen = total;
+    if (!p.handshaking) {
+      p.attempts = 0;
+      startHandshake(p, now);
     }
   }
 
-  void flushQueue(long now) {
-    if (queued != null && cur != null) {
-      if (sendPacket(queued, queuedLen, now)) txPackets++;
-      queued = null;
+  void flushQueue(Peer p, long now) {
+    if (p.queued != null && p.cur != null) {
+      if (sendPacket(p, p.queued, p.queuedLen, now)) p.txPackets++;
+      p.queued = null;
     }
+  }
+
+  Peer byLocalIndex(int idx) {
+    for (int i = 0; i < peerCount; i++) {
+      Peer p = peers[i];
+      if (p.hs.waiting && p.hs.localIndex == idx) return p;
+    }
+    return null;
+  }
+
+  Peer bySessionIndex(int idx) {
+    for (int i = 0; i < peerCount; i++) {
+      Peer p = peers[i];
+      if ((p.cur != null && p.cur.localIndex == idx) || (p.prev != null && p.prev.localIndex == idx)) return p;
+    }
+    return null;
+  }
+
+  void onInitiation(byte[] buf, int n, long now) {
+    Handshake any = peers[0].hs;
+    if (!any.mac1Ok(buf, n)) return; // lo barato primero: sin MAC1 válido no se cuenta ni se gasta nada
+    if (now - secStart >= 1000) {
+      secStart = now;
+      secCount = 0;
+    }
+    if (++secCount > MAX_INITIATIONS_PER_SEC) return; // tope duro del dispositivo: cada iniciación cuesta curvas elípticas
+    boolean load = forceCookies || secCount > MAX_INITIATIONS_PER_SEC / 4;
+    int srcIp = Udp.srcIp;
+    int srcPort = Udp.srcPort;
+    if (load && !cookies.mac2Valid(buf, 132, srcIp, srcPort, now)) {
+      byte[] r = cookies.reply(buf, 116, srcIp, srcPort, sPub, now);
+      Udp.sendTo(udp, srcIp, srcPort, r, 0, Cookies.REPLY);
+      log("bajo carga: respuesta de cookie enviada");
+      return;
+    }
+    Handshake.Init in = any.openInitiation(buf, n);
+    if (in == null) return;
+    Peer p = null;
+    for (int i = 0; i < peerCount && p == null; i++) if (Wg.same(in.stat, 0, peers[i].conf.pub, 0, 32)) p = peers[i];
+    if (p == null) {
+      log("iniciación de una clave que no es de ningún par: descartada");
+      return;
+    }
+    if (!p.hs.consumeInitiation(in, buf)) return;
+    byte[] r = p.hs.createResponse();
+    if (r == null) return;
+    p.ip = srcIp;
+    p.port = srcPort;
+    p.haveEndpoint = true;
+    send(p, r, r.length);
+    p.prev = p.cur;
+    p.cur = p.hs.pending;
+    p.curSince = now;
+    p.handshaking = false;
+    log("apretón de manos aceptado (respondedor)");
   }
 
   void onUdp(byte[] buf, int n, long now) {
     if (n < 4) return;
     int type = buf[0];
     if (type == 1) {
-      if (!hs.mac1Ok(buf, n)) return; // lo barato primero: sin MAC1 válido no se cuenta ni se gasta nada
-      if (now - secStart >= 1000) {
-        secStart = now;
-        secCount = 0;
-      }
-      if (++secCount > MAX_INITIATIONS_PER_SEC) return; // tope duro: cada iniciación cuesta varias multiplicaciones de curva
-      boolean load = forceCookies || secCount > MAX_INITIATIONS_PER_SEC / 4;
-      int res = hs.consume(buf, n, Udp.srcIp, Udp.srcPort, load);
-      if (res == Handshake.COOKIE) {
-        Udp.sendTo(udp, Udp.srcIp, Udp.srcPort, hs.cookieReply, 0, Cookies.REPLY);
-        log("bajo carga: respuesta de cookie enviada");
-        return;
-      }
-      if (res != Handshake.ACCEPT) return;
-      byte[] r = hs.createResponse();
-      if (r == null) return;
-      peerIp = Udp.srcIp;
-      peerPort = Udp.srcPort;
-      haveEndpoint = true;
-      sendDatagram(r, r.length);
-      prev = cur;
-      cur = hs.pending;
-      curSince = now;
-      handshaking = false;
-      log("apretón de manos aceptado (respondedor)");
+      onInitiation(buf, n, now);
     } else if (type == 3) {
-      if (handshaking && hs.consumeCookieReply(buf, n) && attempts < MAX_ATTEMPTS) {
+      Peer p = n >= 8 ? byLocalIndex(Wg.getLE32(buf, 4)) : null;
+      if (p != null && p.handshaking && p.hs.consumeCookieReply(buf, n) && p.attempts < MAX_ATTEMPTS) {
         log("cookie recibida: se repite la iniciación con MAC2");
-        startHandshake(now);
+        startHandshake(p, now);
       }
     } else if (type == 2) {
-      Session s = hs.consumeResponse(buf, n);
+      Peer p = n >= 12 ? byLocalIndex(Wg.getLE32(buf, 8)) : null;
+      if (p == null) return;
+      Session s = p.hs.consumeResponse(buf, n);
       if (s == null) return;
-      prev = cur;
-      cur = s;
-      curSince = now;
-      handshaking = false;
-      attempts = 0;
+      p.prev = p.cur;
+      p.cur = s;
+      p.curSince = now;
+      p.handshaking = false;
+      p.attempts = 0;
       log("apretón de manos completo (iniciador)");
-      byte[] ka = cur.seal(new byte[0], 0); // el primer mensaje de datos lo manda el iniciador y confirma la sesión
-      sendDatagram(ka, ka.length);
-      lastSend = now;
-      flushQueue(now);
+      byte[] ka = p.cur.seal(new byte[0], 0); // el primer mensaje de datos lo manda el iniciador y confirma la sesión
+      send(p, ka, ka.length);
+      p.lastSend = now;
+      flushQueue(p, now);
     } else if (type == 4) {
-      byte[] pt = null;
-      if (cur != null && now - curSince < REJECT_AFTER_MS + 30000) pt = cur.open(buf, n);
-      if (pt == null && prev != null) pt = prev.open(buf, n);
-      if (pt == null) {
-        rxDropped++;
+      Peer p = n >= 8 ? bySessionIndex(Wg.getLE32(buf, 4)) : null;
+      if (p == null) {
+        log("datos para un índice de sesión desconocido (" + n + " bytes)");
         return;
       }
-      peerIp = Udp.srcIp; // itinerancia: solo tras autenticar un mensaje
-      peerPort = Udp.srcPort;
-      haveEndpoint = true;
+      byte[] pt = null;
+      if (p.cur != null && p.cur.localIndex == Wg.getLE32(buf, 4) && now - p.curSince < REJECT_AFTER_MS + 30000) pt = p.cur.open(buf, n);
+      else if (p.prev != null && p.prev.localIndex == Wg.getLE32(buf, 4)) pt = p.prev.open(buf, n);
+      if (pt == null) {
+        log("mensaje de datos que no abre (" + n + " bytes)");
+        p.dropped++;
+        return;
+      }
+      p.ip = Udp.srcIp; // itinerancia: solo tras autenticar un mensaje
+      p.port = Udp.srcPort;
+      p.haveEndpoint = true;
       if (pt.length == 0) return; // keepalive
       int total = ipv4Length(pt, pt.length);
-      if (total < 0 || !inAllowed(ipAt(pt, 12))) {
-        rxDropped++; // origen fuera de las direcciones permitidas: suplantación
+      if (total < 0 || !allowed(p, ipAt(pt, 12))) {
+        log("descartado: paquete de " + pt.length + " bytes" + (total < 0 ? " mal formado" : " con origen " + Ip.str(ipAt(pt, 12)) + " fuera de las rutas del par"));
+        p.dropped++; // origen fuera de las rutas de ESTE par: suplantación
         return;
       }
       Tun.write(tun, pt, 0, total);
-      rxPackets++;
+      p.rxPackets++;
     }
   }
 
   void timers(long now) {
-    if (cur != null && now - curSince >= REJECT_AFTER_MS) cur = null;
-    if (prev != null && now - curSince >= REJECT_AFTER_MS) prev = null;
-    if (handshaking && now - handshakeSent >= REKEY_TIMEOUT_MS) {
-      if (attempts >= MAX_ATTEMPTS) {
-        handshaking = false;
-        queued = null;
-        log("sin respuesta del par: se abandona el apretón de manos");
-      } else {
-        startHandshake(now);
-      }
-    }
-    if (keepaliveSec > 0 && haveEndpoint && now - lastSend >= keepaliveSec * 1000L) {
-      if (cur != null) {
-        byte[] ka = cur.seal(new byte[0], 0);
-        if (ka != null) {
-          sendDatagram(ka, ka.length);
-          lastSend = now;
+    for (int i = 0; i < peerCount; i++) {
+      Peer p = peers[i];
+      if (p.cur != null && now - p.curSince >= REJECT_AFTER_MS) p.cur = null;
+      if (p.prev != null && now - p.curSince >= REJECT_AFTER_MS) p.prev = null;
+      if (p.handshaking && now - p.handshakeSent >= REKEY_TIMEOUT_MS) {
+        if (p.attempts >= MAX_ATTEMPTS) {
+          p.handshaking = false;
+          p.queued = null;
+          log("sin respuesta del par: se abandona el apretón de manos");
+        } else {
+          startHandshake(p, now);
         }
-      } else if (!handshaking) {
-        attempts = 0;
-        startHandshake(now);
-        lastSend = now;
+      }
+      int ka = p.conf.keepalive;
+      if (ka > 0 && p.haveEndpoint && now - p.lastSend >= ka * 1000L) {
+        if (p.cur != null) {
+          byte[] m = p.cur.seal(new byte[0], 0);
+          if (m != null) {
+            send(p, m, m.length);
+            p.lastSend = now;
+          }
+        } else if (!p.handshaking) {
+          p.attempts = 0;
+          startHandshake(p, now);
+          p.lastSend = now;
+        }
       }
     }
+  }
+
+  long delivered() {
+    long t = 0;
+    for (int i = 0; i < peerCount; i++) t += peers[i].rxPackets;
+    return t;
   }
 
   /** Corre el túnel hasta que se mate el proceso. maxPackets > 0 lo termina tras ese número de paquetes entregados a la TUN (para las pruebas). */
@@ -241,7 +325,7 @@ public final class Tunnel {
     byte[] ubuf = new byte[4096];
     byte[] tbuf = new byte[65536];
     long now = System.currentTimeMillis();
-    if (haveEndpoint) startHandshake(now);
+    for (int i = 0; i < peerCount; i++) if (peers[i].haveEndpoint) startHandshake(peers[i], now);
     for (;;) {
       int n = poll.await(1000);
       now = System.currentTimeMillis();
@@ -262,7 +346,7 @@ public final class Tunnel {
         }
       }
       timers(now);
-      if (maxPackets > 0 && rxPackets >= maxPackets) return;
+      if (maxPackets > 0 && delivered() >= maxPackets) return;
     }
   }
 }

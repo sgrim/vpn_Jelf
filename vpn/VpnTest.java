@@ -382,6 +382,81 @@ public final class VpnTest {
     return ct.length == 32 && back != null && Wg.same(back, 0, pt, 0, 16);
   }
 
+  static String cfg(String peers) {
+    return "[Interface]\nPrivateKey = " + B64.encode(Handshake.newPriv()) + "\nListenPort = 51821\n" + peers;
+  }
+
+  static String peerBlock(String allowed, String extra) {
+    return "[Peer]\nPublicKey = " + B64.encode(X25519.publicKey(Handshake.newPriv())) + "\nAllowedIPs = " + allowed + "\n" + extra;
+  }
+
+  static boolean configParsing() {
+    Config ok = Config.parse(cfg(peerBlock("10.9.0.0/24, 192.168.1.0/30", "Endpoint = 1.2.3.4:51820\nPersistentKeepalive = 25\n") + "\n# otro\n" + peerBlock("10.8.0.1/32", "")));
+    boolean good = ok.error == null && ok.peerCount == 2 && ok.listenPort == 51821 && ok.peers[0].routes == 2 && ok.peers[0].keepalive == 25 && ok.peers[0].endpointPort == 51820 && ok.peers[0].endpointIp == Ip.addr("1.2.3.4") && !ok.peers[1].hasEndpoint;
+    Config w = Config.parse("[Interface]\nPrivateKey = " + B64.encode(Handshake.newPriv()) + "\nAddress = 10.9.0.2/24\nDNS = 1.1.1.1\nListenPort = 5\n" + peerBlock("10.9.0.1/32", ""));
+    boolean warn = w.error == null && w.warnings.toString().indexOf("Address") >= 0 && w.warnings.toString().indexOf("DNS") >= 0;
+    String key = B64.encode(Handshake.newPriv());
+    String[] bad = {
+      "", "[Interface]\nPrivateKey = " + key + "\n", cfg(""), cfg("[Peer]\nAllowedIPs = 10.0.0.0/8\n"), cfg(peerBlock("", "")),
+      cfg(peerBlock("10.9.0.0/24", "Nombre = x\n")), cfg(peerBlock("10.9.0.1/24", "")), cfg(peerBlock("10.9.0.0/33", "")), cfg(peerBlock("::/0", "")), cfg(peerBlock("10.9.0.0/24,,10.1.0.0/16", "")),
+      cfg(peerBlock("10.9.0.0/24", "Endpoint = host.ejemplo:51820\n")), cfg(peerBlock("10.9.0.0/24", "Endpoint = 1.2.3.4:0\n")), cfg(peerBlock("10.9.0.0/24", "PersistentKeepalive = x\n")),
+      cfg(peerBlock("10.9.0.0/24", "")) + peerBlock("10.9.0.0/24", ""), cfg("[Peer]\nPublicKey = abc\nAllowedIPs = 10.0.0.0/8\n"),
+      "PrivateKey = " + key + "\n", "[Interface]\nPrivateKey = " + key + "\nPrivateKey = " + key + "\n" + peerBlock("10.0.0.0/8", ""), "[Interface]\nPrivateKey = corta\n" + peerBlock("10.0.0.0/8", ""),
+      "[Interface]\nPrivateKey = " + key + "\nListenPort = 70000\n" + peerBlock("10.0.0.0/8", ""), "[Interfaz]\n", cfg(peerBlock("10.9.0.0/24", "") + "[Interface]\n")
+    };
+    int accepted = 0;
+    String why = "";
+    for (int i = 0; i < bad.length; i++) {
+      Config c = Config.parse(bad[i]);
+      if (c.error == null) {
+        accepted++;
+        why += " #" + i;
+      }
+    }
+    // el mismo par dos veces (misma clave), aunque con rutas distintas
+    String pk = B64.encode(X25519.publicKey(Handshake.newPriv()));
+    String samePeer = cfg("[Peer]\nPublicKey = " + pk + "\nAllowedIPs = 10.1.0.0/16\n[Peer]\nPublicKey = " + pk + "\nAllowedIPs = 10.2.0.0/16\n");
+    boolean dupRejected = Config.parse(samePeer).error != null;
+    if (accepted != 0) System.out.println("       configuraciones inválidas aceptadas:" + why);
+    return good && warn && accepted == 0 && dupRejected;
+  }
+
+  static boolean routing() {
+    Config c = Config.parse(cfg(peerBlock("10.9.0.0/24", "") + peerBlock("10.9.0.64/26", "") + peerBlock("0.0.0.0/0", "") + peerBlock("10.9.0.70/32, 172.16.0.0/12", "")));
+    if (c.error != null) return false;
+    Tunnel t = new Tunnel();
+    t.setup(c);
+    boolean a = t.route(Ip.addr("10.9.0.5")) == t.peers[0]; // solo la /24 lo contiene
+    boolean b = t.route(Ip.addr("10.9.0.100")) == t.peers[1]; // la /26 gana a la /24 y a la /0
+    boolean d = t.route(Ip.addr("10.9.0.70")) == t.peers[3]; // la /32 gana a todas
+    boolean e = t.route(Ip.addr("8.8.8.8")) == t.peers[2]; // el resto por la ruta por omisión
+    boolean f = t.route(Ip.addr("172.20.1.1")) == t.peers[3];
+    boolean g = Tunnel.allowed(t.peers[1], Ip.addr("10.9.0.65")) && !Tunnel.allowed(t.peers[1], Ip.addr("10.9.0.5")) && !Tunnel.allowed(t.peers[0], Ip.addr("10.9.1.5")) && Tunnel.allowed(t.peers[2], Ip.addr("1.1.1.1"));
+    Config n = Config.parse(cfg(peerBlock("10.9.0.0/24", "")));
+    Tunnel u = new Tunnel();
+    u.setup(n);
+    boolean none = u.route(Ip.addr("10.10.0.1")) == null; // sin ruta: se descarta, no se envía a nadie
+    return a && b && d && e && f && g && none;
+  }
+
+  static boolean multiPeerHandshake() {
+    byte[] srv = Handshake.newPriv();
+    byte[] ca = Handshake.newPriv();
+    byte[] cb = Handshake.newPriv();
+    Handshake sa = new Handshake(srv, X25519.publicKey(ca), null);
+    Handshake sb = new Handshake(srv, X25519.publicKey(cb), null);
+    Handshake a = new Handshake(ca, X25519.publicKey(srv), null);
+    byte[] m = a.createInitiation();
+    Handshake.Init in = sa.openInitiation(m, m.length);
+    boolean staticFound = in != null && Wg.same(in.stat, 0, X25519.publicKey(ca), 0, 32);
+    boolean wrongPeer = !sb.consumeInitiation(in, m); // la clave estática descifrada no es la de ese par: obligatorio con varios pares
+    boolean rightPeer = sa.consumeInitiation(in, m);
+    byte[] r = sa.createResponse();
+    boolean full = r != null && a.consumeResponse(r, r.length) != null;
+    boolean none = sa.openInitiation(cut(m, 147), 147) == null;
+    return staticFound && wrongPeer && rightPeer && full && none;
+  }
+
   public static boolean run() {
     check("APRETÓN DE MANOS: iniciador y respondedor (Noise_IKpsk2) derivan las mismas claves; los datos van en los dos sentidos, con relleno a 16 y la etiqueta", handshakes());
     check("CLAVE PRECOMPARTIDA: con la misma funciona; con otra, el iniciador no abre la respuesta", psk());
@@ -402,6 +477,9 @@ public final class VpnTest {
     check("COOKIES manipuladas: cada bit de la respuesta, otro largo, una respuesta vieja para una iniciación nueva y la de otro par se rechazan", cookieTamper());
     check("COOKIES con tiempo: la del iniciador no se usa pasados 120 s y el secreto del respondedor rota (cookie vieja inválida)", cookieExpiry());
     check("XChaCha20-Poly1305 de 24 bytes de nonce, ida y vuelta (la validación de fondo está en edge_Jelf y en el kernel)", xchachaCookie());
+    check("CONFIGURACIÓN: se leen pares, rutas, endpoint y keepalive; Address/DNS se avisan y no se aplican; 20 configuraciones inválidas (sin claves, IPv6, bits de host, nombres de host, duplicados, rutas repetidas...) se rechazan", configParsing());
+    check("ENRUTAMIENTO por clave criptográfica: gana la ruta más larga entre varios pares, la ruta por omisión recoge el resto, sin ruta se descarta, y el origen de un paquete debe estar en las rutas de ESE par", routing());
+    check("VARIOS PARES: la clave estática descifrada elige al par; otro par configurado con el mismo dispositivo rechaza la iniciación ajena (comprobación obligatoria)", multiPeerHandshake());
     System.out.println("jvpn selftest: " + (total - bad) + " de " + total);
     return bad == 0;
   }

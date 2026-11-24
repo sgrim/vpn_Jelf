@@ -20,7 +20,7 @@ public final class Handshake {
   final byte[] myMac1Key;
   final byte[] peerMac1Key;
   /** Lado respondedor de las cookies (secreto por origen). */
-  public final Cookies cookies = new Cookies();
+  public Cookies cookies = new Cookies();
   /** Lado iniciador: la última cookie recibida del par, su momento, y el MAC1 de la última iniciación (es el dato asociado de la respuesta de cookie). */
   byte[] cookie;
   long cookieTime;
@@ -173,11 +173,20 @@ public final class Handshake {
     return consumeInitiation(m, len) ? ACCEPT : REJECT;
   }
 
-  /** Procesa una iniciación (tipo 1); true si es del par configurado, con MAC1 y marca de tiempo válidas. Deja el estado para createResponse. */
-  public boolean consumeInitiation(byte[] m, int len) {
-    if (len != Wg.INITIATION || m[0] != 1 || m[1] != 0 || m[2] != 0 || m[3] != 0) return false;
-    byte[] mac1 = Wg.mac(myMac1Key, m, 116);
-    if (!Wg.same(mac1, 0, m, 116, 16)) return false;
+  /** Resultado de la fase 1 del respondedor: el estado del apretón de manos tras descifrar la clave estática del iniciador (todavía sin saber si es un par conocido). */
+  public static final class Init {
+    public byte[] c;
+    public byte[] h;
+    public byte[] ePub;
+    public byte[] stat;
+  }
+
+  /**
+   * Fase 1 (no depende del par): MAC1, multiplicación con la efímera y descifrado de la clave estática del iniciador. Devuelve null si no vale. Con VARIOS pares se hace una sola vez y la clave estática
+   * descifrada elige al par (consumeInitiation(Init, m) del par elegido hace la fase 2).
+   */
+  public Init openInitiation(byte[] m, int len) {
+    if (!mac1Ok(m, len)) return null;
     byte[] cc = Wg.hash(Wg.CONSTRUCTION, null);
     byte[] hh = Wg.hash(cc, Wg.IDENTIFIER);
     hh = Wg.hash(hh, sPub);
@@ -186,29 +195,43 @@ public final class Handshake {
     cc = Wg.kdf(cc, epub, 1)[0];
     hh = Wg.hash(hh, epub);
     byte[] dh = X25519.shared(sPriv, epub);
-    if (dh == null) return false;
+    if (dh == null) return null;
     byte[][] k = Wg.kdf(cc, dh, 2);
     cc = k[0];
     byte[] stat = Wg.open(k[1], 0, hh, m, 40, 48);
-    if (stat == null || !Wg.same(stat, 0, peerPub, 0, 32)) return false;
+    if (stat == null) return null;
     byte[] statCt = new byte[48];
     Wg.copy(m, 40, statCt, 0, 48);
-    hh = Wg.hash(hh, statCt);
-    dh = X25519.shared(sPriv, peerPub);
+    Init in = new Init();
+    in.c = cc;
+    in.h = Wg.hash(hh, statCt);
+    in.ePub = epub;
+    in.stat = stat;
+    return in;
+  }
+
+  /** Fase 2: ¿es la clave estática de ESTE par (comparación obligatoria con varios pares)?, marca de tiempo mayor que la última aceptada. Deja el estado para createResponse. */
+  public boolean consumeInitiation(Init in, byte[] m) {
+    if (in == null || !Wg.same(in.stat, 0, peerPub, 0, 32)) return false;
+    byte[] dh = X25519.shared(sPriv, peerPub);
     if (dh == null) return false;
-    k = Wg.kdf(cc, dh, 2);
-    cc = k[0];
-    byte[] ts = Wg.open(k[1], 0, hh, m, 88, 28);
+    byte[][] k = Wg.kdf(in.c, dh, 2);
+    byte[] cc = k[0];
+    byte[] ts = Wg.open(k[1], 0, in.h, m, 88, 28);
     if (ts == null || !Wg.newer(ts, lastTimestamp)) return false;
     byte[] tsCt = new byte[28];
     Wg.copy(m, 88, tsCt, 0, 28);
-    hh = Wg.hash(hh, tsCt);
     lastTimestamp = ts;
     rc = cc;
-    rh = hh;
-    ePubI = epub;
+    rh = Wg.hash(in.h, tsCt);
+    ePubI = in.ePub;
     remoteIndex = Wg.getLE32(m, 4);
     return true;
+  }
+
+  /** Procesa una iniciación (tipo 1) de un solo par: true si es el par configurado, con MAC1 y marca de tiempo válidas. */
+  public boolean consumeInitiation(byte[] m, int len) {
+    return consumeInitiation(openInitiation(m, len), m);
   }
 
   /** Arma la respuesta; devuelve {mensaje, null} y deja la sesión en session(). Llamar solo tras un consumeInitiation verdadero. */
