@@ -61,6 +61,51 @@ public final class Session {
     return pt;
   }
 
+  static final byte[] NO_AAD = new byte[0];
+  final byte[] nonceBuf = new byte[12];
+
+  /**
+   * Como seal pero SIN reservar: arma el mensaje de datos de p[0..len) en out (que debe medir al menos 16 + relleno + 16 bytes; una de 65 664 sirve para cualquier paquete) y devuelve su largo, o -1 si la sesión
+   * agotó sus mensajes o no cabe. El paquete se cifra en el sitio dentro de out.
+   */
+  public int sealInto(byte[] p, int len, byte[] out) {
+    if (sendCounter >= REJECT_AFTER || sendCounter < 0) return -1;
+    int padded = (len + 15) & ~15;
+    int total = Wg.DATA_HEADER + padded + Wg.TAG;
+    if (len < 0 || total > out.length) return -1;
+    out[0] = 4;
+    out[1] = 0;
+    out[2] = 0;
+    out[3] = 0;
+    Wg.putLE32(out, 4, remoteIndex);
+    Wg.putLE64(out, 8, sendCounter);
+    for (int i = 0; i < len; i++) out[Wg.DATA_HEADER + i] = p[i];
+    for (int i = len; i < padded; i++) out[Wg.DATA_HEADER + i] = 0;
+    for (int i = 0; i < 4; i++) nonceBuf[i] = 0;
+    Wg.putLE64(nonceBuf, 4, sendCounter);
+    ChaCha20Poly1305.sealInto(sendKey, nonceBuf, NO_AAD, out, Wg.DATA_HEADER, padded, out, Wg.DATA_HEADER);
+    sendCounter++;
+    return total;
+  }
+
+  /**
+   * Como open pero SIN reservar: descifra el mensaje m[0..len) en out[0..) y devuelve el largo del contenido (con su relleno), o -1 si no es para esta sesión, la etiqueta no vale o se repite.
+   * La etiqueta se comprueba ANTES de tocar la ventana y de escribir en out.
+   */
+  public int openInto(byte[] m, int len, byte[] out) {
+    if (len < Wg.DATA_HEADER + Wg.TAG || m[0] != 4 || m[1] != 0 || m[2] != 0 || m[3] != 0) return -1;
+    if (Wg.getLE32(m, 4) != localIndex) return -1;
+    long ctr = Wg.getLE64(m, 8);
+    if (ctr < 0 || ctr >= REJECT_AFTER) return -1;
+    if (!fresh(ctr)) return -1;
+    for (int i = 0; i < 4; i++) nonceBuf[i] = 0;
+    Wg.putLE64(nonceBuf, 4, ctr);
+    int n = ChaCha20Poly1305.openInto(recvKey, nonceBuf, NO_AAD, m, Wg.DATA_HEADER, len - Wg.DATA_HEADER, out, 0);
+    if (n < 0) return -1;
+    mark(ctr);
+    return n;
+  }
+
   boolean fresh(long ctr) {
     if (ctr > highest) return true;
     if (highest - ctr >= WINDOW) return false;

@@ -44,6 +44,11 @@ public final class Tunnel {
   }
 
   Peer[] peers;
+  final byte[] txBuf = new byte[65664]; // búferes fijos del camino caliente: no se reserva nada por paquete
+  static final int POOL = 9216; // un datagrama por búfer del lote (MTU de hasta jumbo)
+  final byte[][] txPool = new byte[Udp.BATCH][POOL];
+  final byte[][] rxPool = new byte[Udp.BATCH][POOL];
+  final byte[] rxPlain = new byte[65664];
   int peerCount;
   byte[] sPub;
   Cookies cookies = new Cookies();
@@ -111,6 +116,11 @@ public final class Tunnel {
     return best;
   }
 
+  /** Envía con una sola llamada los datagramas de datos acumulados. */
+  void flushSend() {
+    if (Udp.queuedCount() > 0) Udp.sendFlush(udp);
+  }
+
   void send(Peer p, byte[] m, int len) {
     if (p.haveEndpoint) Udp.sendTo(udp, p.ip, p.port, m, 0, len);
   }
@@ -135,12 +145,14 @@ public final class Tunnel {
       p.attempts = 0;
       startHandshake(p, now);
     }
-    byte[] m = p.cur.seal(pkt, len);
-    if (m == null) {
+    if (Udp.queuedCount() == Udp.BATCH) flushSend();
+    byte[] slot = txPool[Udp.queuedCount()];
+    int ml = p.cur.sealInto(pkt, len, slot);
+    if (ml < 0) {
       p.cur = null;
       return false;
     }
-    send(p, m, m.length);
+    if (p.haveEndpoint) Udp.sendAdd(slot, 0, ml, p.ip, p.port); // se envía por lotes (sendmmsg) al terminar de atender lo que haya en la TUN
     p.lastSend = now;
     return true;
   }
@@ -186,7 +198,7 @@ public final class Tunnel {
     return null;
   }
 
-  void onInitiation(byte[] buf, int n, long now) {
+  void onInitiation(byte[] buf, int n, long now, int srcIp, int srcPort) {
     Handshake any = peers[0].hs;
     if (!any.mac1Ok(buf, n)) return; // lo barato primero: sin MAC1 válido no se cuenta ni se gasta nada
     if (now - secStart >= 1000) {
@@ -195,8 +207,6 @@ public final class Tunnel {
     }
     if (++secCount > MAX_INITIATIONS_PER_SEC) return; // tope duro del dispositivo: cada iniciación cuesta curvas elípticas
     boolean load = forceCookies || secCount > MAX_INITIATIONS_PER_SEC / 4;
-    int srcIp = Udp.srcIp;
-    int srcPort = Udp.srcPort;
     if (load && !cookies.mac2Valid(buf, 132, srcIp, srcPort, now)) {
       byte[] r = cookies.reply(buf, 116, srcIp, srcPort, sPub, now);
       Udp.sendTo(udp, srcIp, srcPort, r, 0, Cookies.REPLY);
@@ -225,11 +235,11 @@ public final class Tunnel {
     log("apretón de manos aceptado (respondedor)");
   }
 
-  void onUdp(byte[] buf, int n, long now) {
+  void onUdp(byte[] buf, int n, long now, int srcIp, int srcPort) {
     if (n < 4) return;
     int type = buf[0];
     if (type == 1) {
-      onInitiation(buf, n, now);
+      onInitiation(buf, n, now, srcIp, srcPort);
     } else if (type == 3) {
       Peer p = n >= 8 ? byLocalIndex(Wg.getLE32(buf, 4)) : null;
       if (p != null && p.handshaking && p.hs.consumeCookieReply(buf, n) && p.attempts < MAX_ATTEMPTS) {
@@ -247,8 +257,8 @@ public final class Tunnel {
       p.handshaking = false;
       p.attempts = 0;
       log("apretón de manos completo (iniciador)");
-      byte[] ka = p.cur.seal(new byte[0], 0); // el primer mensaje de datos lo manda el iniciador y confirma la sesión
-      send(p, ka, ka.length);
+      int kl = p.cur.sealInto(txBuf, 0, txBuf); // el primer mensaje de datos lo manda el iniciador y confirma la sesión
+      send(p, txBuf, kl);
       p.lastSend = now;
       flushQueue(p, now);
     } else if (type == 4) {
@@ -257,25 +267,25 @@ public final class Tunnel {
         log("datos para un índice de sesión desconocido (" + n + " bytes)");
         return;
       }
-      byte[] pt = null;
-      if (p.cur != null && p.cur.localIndex == Wg.getLE32(buf, 4) && now - p.curSince < REJECT_AFTER_MS + 30000) pt = p.cur.open(buf, n);
-      else if (p.prev != null && p.prev.localIndex == Wg.getLE32(buf, 4)) pt = p.prev.open(buf, n);
-      if (pt == null) {
+      int pl = -1;
+      if (p.cur != null && p.cur.localIndex == Wg.getLE32(buf, 4) && now - p.curSince < REJECT_AFTER_MS + 30000) pl = p.cur.openInto(buf, n, rxPlain);
+      else if (p.prev != null && p.prev.localIndex == Wg.getLE32(buf, 4)) pl = p.prev.openInto(buf, n, rxPlain);
+      if (pl < 0) {
         log("mensaje de datos que no abre (" + n + " bytes)");
         p.dropped++;
         return;
       }
-      p.ip = Udp.srcIp; // itinerancia: solo tras autenticar un mensaje
-      p.port = Udp.srcPort;
+      p.ip = srcIp; // itinerancia: solo tras autenticar un mensaje
+      p.port = srcPort;
       p.haveEndpoint = true;
-      if (pt.length == 0) return; // keepalive
-      int total = ipv4Length(pt, pt.length);
-      if (total < 0 || !allowed(p, ipAt(pt, 12))) {
-        log("descartado: paquete de " + pt.length + " bytes" + (total < 0 ? " mal formado" : " con origen " + Ip.str(ipAt(pt, 12)) + " fuera de las rutas del par"));
+      if (pl == 0) return; // keepalive
+      int total = ipv4Length(rxPlain, pl);
+      if (total < 0 || !allowed(p, ipAt(rxPlain, 12))) {
+        log("descartado: paquete de " + pl + " bytes" + (total < 0 ? " mal formado" : " con origen " + Ip.str(ipAt(rxPlain, 12)) + " fuera de las rutas del par"));
         p.dropped++; // origen fuera de las rutas de ESTE par: suplantación
         return;
       }
-      Tun.write(tun, pt, 0, total);
+      Tun.write(tun, rxPlain, 0, total);
       p.rxPackets++;
     }
   }
@@ -297,9 +307,9 @@ public final class Tunnel {
       int ka = p.conf.keepalive;
       if (ka > 0 && p.haveEndpoint && now - p.lastSend >= ka * 1000L) {
         if (p.cur != null) {
-          byte[] m = p.cur.seal(new byte[0], 0);
-          if (m != null) {
-            send(p, m, m.length);
+          int kl = p.cur.sealInto(txBuf, 0, txBuf);
+          if (kl >= 0) {
+            send(p, txBuf, kl);
             p.lastSend = now;
           }
         } else if (!p.handshaking) {
@@ -322,7 +332,6 @@ public final class Tunnel {
     Poller poll = new Poller(4);
     poll.add(udp, Net.IN);
     poll.add(tun, Net.IN);
-    byte[] ubuf = new byte[4096];
     byte[] tbuf = new byte[65536];
     long now = System.currentTimeMillis();
     for (int i = 0; i < peerCount; i++) if (peers[i].haveEndpoint) startHandshake(peers[i], now);
@@ -332,17 +341,20 @@ public final class Tunnel {
       for (int i = 0; i < n; i++) {
         int fd = poll.fd(i);
         if (fd == udp) {
-          for (int k = 0; k < 64; k++) { // se vacía el socket, con tope para no dejar sin atender la TUN
-            int r = Udp.recvFrom(udp, ubuf, 0, ubuf.length);
-            if (r < 0) break;
-            onUdp(ubuf, r, now);
+          for (int k = 0; k < 2; k++) { // se vacía el socket por lotes de hasta 32 datagramas con una llamada, con tope para no dejar sin atender la TUN
+            int r = Udp.recvBatch(udp, rxPool, Udp.BATCH);
+            if (r <= 0) break;
+            for (int j = 0; j < r; j++) onUdp(rxPool[j], Udp.batchLen[j], now, Udp.batchIp[j], Udp.batchPort[j]);
+            if (r < Udp.BATCH) break;
           }
+          flushSend();
         } else if (fd == tun) {
           for (int k = 0; k < 64; k++) {
             int r = Tun.read(tun, tbuf, 0, tbuf.length);
             if (r <= 0) break;
             onTun(tbuf, r, now);
           }
+          flushSend();
         }
       }
       timers(now);

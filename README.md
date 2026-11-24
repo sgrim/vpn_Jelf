@@ -24,4 +24,4 @@ Si `jvpn` muere, la interfaz y su ruta siguen y el tráfico se pierde (no sale e
 
 ## Rendimiento (medido en una máquina de pruebas, no general)
 
-`tools/bench_tunnel.sh` (iperf3 entre contenedores, el WireGuard del kernel como línea base) y `jvpn bench`: ≈ 230 Mbit/s por túnel frente a ≈ 700 del kernel en el mismo banco; 675 Mbit/s de cifrado por núcleo en memoria. Detalle, método y límites en `AUDITORIA.md` 7.
+`tools/bench_tunnel.sh` (iperf3 entre contenedores, el WireGuard del kernel como línea base) y `jvpn bench`: ≈ 280 Mbit/s por túnel frente a ≈ 750 del kernel en el mismo banco (de ≈ 210 al empezar); ≈ 960 Mbit/s de cifrado por núcleo en memoria. Detalle, método y límites en `AUDITORIA.md` 7 y 8.

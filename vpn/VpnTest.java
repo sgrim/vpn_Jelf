@@ -176,6 +176,62 @@ public final class VpnTest {
     return accepted == 0 && cutOff && other && s[1].open(m, m.length) != null;
   }
 
+  static boolean noAlloc() {
+    Handshake[] p = pair(null);
+    Session[] s = full(p[0], p[1]);
+    boolean ok = true;
+    byte[] out = new byte[65664];
+    byte[] plain = new byte[65664];
+    for (int len = 0; len <= 1500; len += (len < 40 ? 1 : 37)) {
+      byte[] x = rb(len);
+      byte[] a = s[0].seal(x, len);
+      Handshake[] q = pair(null);
+      Session[] u = full(q[0], q[1]);
+      byte[] b = u[0].seal(x, len);
+      int n = u[0].sealInto(x, len, out);
+      // los dos caminos dan el mismo largo y los mismos datos que abre el otro lado
+      ok &= n == b.length - 0 + 0 || n == a.length;
+      int got = s[1].openInto(a, a.length, plain);
+      ok &= got == ((len + 15) & ~15);
+      for (int i = 0; i < len; i++) ok &= plain[i] == x[i];
+      for (int i = len; i < got; i++) ok &= plain[i] == 0;
+      byte[] copy = new byte[n];
+      for (int i = 0; i < n; i++) copy[i] = out[i];
+      byte[] viaOpen = u[1].open(copy, n);
+      ok &= viaOpen != null && viaOpen.length == got;
+    }
+    // el búfer se reutiliza de MAYOR a menor: el relleno no puede ser basura del paquete anterior; y dos envíos seguidos usan contadores distintos
+    for (int len = 1500; len >= 0; len -= 61) {
+      byte[] x = rb(len);
+      Handshake[] q = pair(null);
+      Session[] u = full(q[0], q[1]);
+      int n1 = u[0].sealInto(x, len, out);
+      byte[] c1 = new byte[n1];
+      for (int i = 0; i < n1; i++) c1[i] = out[i];
+      int n2 = u[0].sealInto(x, len, out);
+      byte[] c2 = new byte[n2];
+      for (int i = 0; i < n2; i++) c2[i] = out[i];
+      int g1 = u[1].openInto(c1, n1, plain);
+      boolean padZero = true;
+      for (int i = len; i < g1; i++) if (plain[i] != 0) padZero = false;
+      ok &= g1 == ((len + 15) & ~15) && padZero && u[1].openInto(c2, n2, plain) == g1 && Wg.getLE64(c1, 8) == 0 && Wg.getLE64(c2, 8) == 1 && u[1].openInto(c1, n1, plain) == -1;
+    }
+    // repetición y etiqueta falsa por el camino sin reservar: igual que open
+    byte[] m = s[0].seal(new byte[] {1, 2, 3}, 3);
+    ok &= s[1].openInto(m, m.length, plain) == 16 && s[1].openInto(m, m.length, plain) == -1;
+    byte[] m2 = s[0].seal(new byte[] {4}, 1);
+    byte[] f = cut(m2, m2.length);
+    f[f.length - 1] ^= 1;
+    for (int i = 0; i < 16; i++) plain[i] = (byte) 0x77;
+    ok &= s[1].openInto(f, f.length, plain) == -1 && plain[0] == (byte) 0x77 && s[1].openInto(m2, m2.length, plain) == 16;
+    // un búfer pequeño no se desborda
+    ok &= s[0].sealInto(new byte[100], 100, new byte[50]) == -1;
+    // la sesión agotada no emite
+    s[0].sendCounter = Session.REJECT_AFTER;
+    ok &= s[0].sealInto(new byte[1], 1, out) == -1;
+    return ok;
+  }
+
   static boolean keepalive() {
     Handshake[] p = pair(null);
     Session[] s = full(p[0], p[1]);
@@ -463,11 +519,12 @@ public final class VpnTest {
     Session[] s = full(p[0], p[1]);
     byte[] pkt = new byte[size];
     for (int i = 0; i < size; i++) pkt[i] = (byte) (i * 7);
+    byte[] tx = new byte[65664];
     long t0 = System.currentTimeMillis();
     long n = 0;
     while (System.currentTimeMillis() - t0 < 2000) {
       for (int k = 0; k < 200; k++) {
-        byte[] m = s[0].seal(pkt, size);
+        s[0].sealInto(pkt, size, tx);
         n++;
       }
     }
@@ -504,6 +561,7 @@ public final class VpnTest {
     check("REPETICIÓN de una iniciación (misma marca de tiempo) y marca más vieja que la última aceptada: rechazadas", replayedInitiation());
     check("RESPUESTA fuera de lugar: sin iniciación, con otro índice, o repetida, no crea sesión", responseNeedsInitiation());
     check("DATOS manipulados: cada bit de cada byte del mensaje (encabezado, contador, cifrado, etiqueta), cortado o para el otro sentido, se rechaza", dataIntegrity());
+    check("SIN RESERVAR: sealInto/openInto dan lo mismo que seal/open (0 a 1500 bytes), con repetición y etiqueta falsa rechazadas sin tocar la salida, búfer pequeño y sesión agotada", noAlloc());
     check("KEEPALIVE: un mensaje sin contenido mide 32 bytes y se abre", keepalive());
     check("VENTANA antirrepetición de 2048: repetidos, atrasados dentro y fuera de la ventana, salto grande y etiqueta falsa que NO mueve la ventana", replayWindow());
     check("LÍMITE de mensajes: la sesión deja de emitir en REJECT_AFTER y el receptor lo rechaza", limits());
