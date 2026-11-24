@@ -60,6 +60,20 @@ docker exec $B grep -q "PERSISTENTE" /log && ok "jvpn hace la interfaz persisten
 sleep 2
 connect; a=$(seen 10.9.0.2); b=$(seen $BIP); settle
 [ "$a" -ge 1 ] && [ "$b" = 0 ] && ok "con el túnel completo, la conexión a «Internet» llega a T desde 10.9.0.2 (salió por el túnel y la salida S) y no desde la dirección normal de B" || fail "túnel completo: visto-por-túnel=$a visto-directo=$b"
+# 1b) DNS (R-V05): consultas UDP/53 con el túnel completo. S (10.9.0.1, DENTRO del túnel) y T (203.0.113.9, «Internet», y su dirección de la red local) corren un servidor DNS de prueba que anota el origen de cada consulta
+[ -x build/dnsstub ] || ../../../compiladorELF/1.0.1/src/jelf.sh tools/DnsStub.java -o build/dnsstub > /dev/null 2>&1
+docker cp build/dnsstub $S:/dnsstub > /dev/null; docker cp build/dnsstub $X:/dnsstub > /dev/null
+docker exec -d $S sh -c "/dnsstub 53 10.9.0.1 > /dns.log 2>&1"; docker exec -d $X sh -c "/dnsstub 53 $NET > /dns.log 2>&1"; docker exec -d $X sh -c "/dnsstub 53 $XIP > /dns2.log 2>&1"
+sleep 1
+lookup() { docker exec $B sh -c "timeout 5 nslookup nombre.prueba $1 > /dev/null 2>&1; echo \$?"; }
+qn() { docker exec $1 sh -c "cat /dns.log /dns2.log 2>/dev/null | grep -c '^q $2\$'" 2>/dev/null; }
+s0=$(qn $S 10.9.0.2); t0=$(qn $X 10.9.0.2); tb0=$(qn $X $BIP)
+r=$(lookup 10.9.0.1); s1=$(qn $S 10.9.0.2); t1=$(qn $X 10.9.0.2); tb1=$(qn $X $BIP)
+[ "$r" = 0 ] && [ $((s1 - s0)) -ge 1 ] && [ "$t1" = "$t0" ] && [ "$tb1" = "$tb0" ] && ok "DNS con el servidor DENTRO del túnel (10.9.0.1): la consulta llega a S desde 10.9.0.2 y a «Internet» no le llega nada" || fail "DNS por el túnel: rc=$r S $s0->$s1, T(túnel) $t0->$t1, T(directo) $tb0->$tb1"
+r=$(lookup $NET); t2=$(qn $X 10.9.0.2); tb2=$(qn $X $BIP)
+[ "$r" = 0 ] && [ $((t2 - t1)) -ge 1 ] && [ "$tb2" = "$tb1" ] && ok "DNS con un servidor de «Internet» (203.0.113.9): la consulta sale por el túnel (T la ve desde 10.9.0.2) y no en claro desde la dirección de B" || fail "DNS a Internet: rc=$r T(túnel) $t1->$t2, T(directo) $tb1->$tb2"
+r=$(lookup $XIP); tb3=$(qn $X $BIP)
+[ "$r" = 0 ] && [ $((tb3 - tb2)) -ge 1 ] && ok "ADVERTENCIA CONFIRMADA: un servidor DNS en la red LOCAL (la misma subred de B) se consulta EN CLARO aunque haya túnel completo (T la ve desde la dirección de B): el DNS debe estar dentro del túnel o fuera de la subred local" || fail "DNS local: se esperaba la consulta directa (rc=$r, $tb2->$tb3): la advertencia de AUDITORIA 10 no se confirmó"
 # 2) jvpn MUERE: la interfaz persiste y no hay fuga
 docker exec $B sh -c "kill \$(pidof jvpn)"; sleep 1
 docker exec $B sh -c "ip link show jt0" > /dev/null 2>&1 && ok "tras morir jvpn la interfaz persiste (con sus rutas)" || fail "la interfaz desapareció al morir jvpn"
@@ -67,6 +81,9 @@ a0=$(seen 10.9.0.2); b0=$(seen $BIP)
 connect; b1=$(seen $BIP); a1=$(seen 10.9.0.2); settle
 docker exec $B ping -c 2 -W 1 $NET > /dev/null 2>&1; pr=$?
 [ "$b1" = "$b0" ] && [ "$a1" = "$a0" ] && [ $pr -ne 0 ] && ok "INTERRUPTOR: con jvpn muerto la conexión no llega a T por ningún camino (ni por el túnel ni desde la dirección normal de B) y el ping falla: sin fuga" || fail "fuga con jvpn muerto: T ve directo $b0->$b1, túnel $a0->$a1, ping=$pr"
+tb0=$(qn $X $BIP); t0=$(qn $X 10.9.0.2)
+r=$(lookup $NET); tb1=$(qn $X $BIP); t1=$(qn $X 10.9.0.2)
+[ "$r" != 0 ] && [ "$tb0" = "$tb1" ] && [ "$t0" = "$t1" ] && ok "DNS con jvpn muerto: la consulta falla y no llega a T por ningún camino (el interruptor cubre también el DNS)" || fail "DNS con jvpn muerto: rc=$r, T(directo) $tb0->$tb1, T(túnel) $t0->$t1"
 # 3) jvpn relanzado se reúne a la interfaz persistente que ya existía
 docker exec -d $B sh -c "/jvpn up /wg.conf --tun jt0 --user 65534 --persist -v > /log 2>&1"
 i=0; while [ $i -lt 30 ] && ! docker exec $B grep -q "privilegios soltados" /log 2>/dev/null; do sleep 0.3; i=$((i+1)); done

@@ -20,7 +20,7 @@ jvpn up wg.conf --tun jt0 --user 65534 --persist &      # con privilegios: crea 
 ip addr add 10.9.0.2/24 dev jt0 && ip link set jt0 up mtu 1420
 tools/fullroute.sh up jt0 51820                          # todo el tráfico sin marca va por el túnel
 ```
-Si `jvpn` muere, la interfaz y su ruta siguen y el tráfico se pierde (no sale en claro). Para que no haya ventana al arrancar, cree antes la interfaz y las rutas: `ip tuntap add dev jt0 mode tun user 65534`, direcciones y `fullroute.sh up`, y después `jvpn up`. IPv6 queda bloqueado. DNS no se configura: apunte `resolv.conf` a un servidor del túnel. Detalle y límites: `AUDITORIA.md` 6 y 9.
+Si `jvpn` muere, la interfaz y su ruta siguen y el tráfico se pierde (no sale en claro). Para que no haya ventana al arrancar, cree antes la interfaz y las rutas: `ip tuntap add dev jt0 mode tun user 65534`, direcciones y `fullroute.sh up`, y después `jvpn up`. IPv6 queda bloqueado. DNS no se configura: apunte `resolv.conf` a un servidor DENTRO del túnel (uno de la red local se consulta en claro: `AUDITORIA.md` 10). Detalle y límites: `AUDITORIA.md` 6 y 9.
 
 ## Rendimiento (medido en una máquina de pruebas, no general)
 
