@@ -457,6 +457,43 @@ public final class VpnTest {
     return staticFound && wrongPeer && rightPeer && full && none;
   }
 
+  /** Mide en memoria (sin red): cifrar y abrir paquetes de un tamaño dado, y apretones de manos por segundo. */
+  public static void bench(int size) {
+    Handshake[] p = pair(null);
+    Session[] s = full(p[0], p[1]);
+    byte[] pkt = new byte[size];
+    for (int i = 0; i < size; i++) pkt[i] = (byte) (i * 7);
+    long t0 = System.currentTimeMillis();
+    long n = 0;
+    while (System.currentTimeMillis() - t0 < 2000) {
+      for (int k = 0; k < 200; k++) {
+        byte[] m = s[0].seal(pkt, size);
+        n++;
+      }
+    }
+    long ms = System.currentTimeMillis() - t0;
+    System.out.println("cifrar:  " + (n * 1000L / ms) + " paquetes/s de " + size + " bytes = " + (n * size / 1000L / ms) + " MB/s = " + (n * size * 8L / 1000L / ms) + " Mbit/s (un núcleo, sin red)");
+    int cnt = 20000 * 1400 / size > 60000 ? 60000 : 20000 * 1400 / size;
+    Handshake[] qb = pair(null);
+    Session[] t = full(qb[0], qb[1]);
+    byte[][] ms2 = new byte[cnt][];
+    for (int k = 0; k < cnt; k++) ms2[k] = t[0].seal(pkt, size);
+    long m0 = System.currentTimeMillis();
+    int good = 0;
+    for (int k = 0; k < cnt; k++) if (t[1].open(ms2[k], ms2[k].length) != null) good++;
+    long ms3 = System.currentTimeMillis() - m0;
+    if (ms3 == 0) ms3 = 1;
+    System.out.println("abrir:   " + (good * 1000L / ms3) + " paquetes/s de " + size + " bytes = " + (good * (long) size * 8L / 1000L / ms3) + " Mbit/s (incluye la ventana antirrepetición)");
+    long h0 = System.currentTimeMillis();
+    int hs = 0;
+    while (System.currentTimeMillis() - h0 < 2000) {
+      Handshake[] q = pair(null);
+      full(q[0], q[1]);
+      hs++;
+    }
+    System.out.println("apretones de manos completos (los dos lados): " + (hs * 1000L / (System.currentTimeMillis() - h0)) + " por segundo");
+  }
+
   public static boolean run() {
     check("APRETÓN DE MANOS: iniciador y respondedor (Noise_IKpsk2) derivan las mismas claves; los datos van en los dos sentidos, con relleno a 16 y la etiqueta", handshakes());
     check("CLAVE PRECOMPARTIDA: con la misma funciona; con otra, el iniciador no abre la respuesta", psk());

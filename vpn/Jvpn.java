@@ -22,7 +22,7 @@ public class Jvpn {
 
   static void usage() {
     System.out.println(NAME + " " + VERSION + ": VPN compatible con WireGuard de la nube de jelf (línea de órdenes), nativa y sin dependencias (fase V0: el protocolo).");
-    System.out.println("órdenes: version, help, genkey, pubkey ARCHIVO, selftest, up, probe, listen, cookie-probe");
+    System.out.println("órdenes: version, help, genkey, pubkey ARCHIVO, selftest, bench, up, probe, listen, cookie-probe");
     System.out.println("  genkey                      escribe una clave privada nueva (base64, como «wg genkey»)");
     System.out.println("  pubkey ARCHIVO              escribe la clave pública de la privada que hay en ARCHIVO");
     System.out.println("  up CONFIG --tun NOMBRE [--user UID] [--persist] [--force-cookies] [-v]");
@@ -75,6 +75,10 @@ public class Jvpn {
     }
     if (o.equals("selftest")) {
       System.exit(VpnTest.run() ? 0 : 1);
+    }
+    if (o.equals("bench")) {
+      VpnTest.bench(args.length > 1 ? Integer.parseInt(args[1]) : 1400);
+      return;
     }
     if (o.equals("up")) {
       up(args);

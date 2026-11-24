@@ -49,3 +49,21 @@
 **Mutaciones (base con 0 fallos):** sin persistencia (3 fallos: la interfaz desaparece y hay fuga), sin marca en el socket (el túnel no se establece: detectada tras corregir la topología; antes NO se detectaba).
 **Hallazgos honestos:** (a) la marca (`SO_MARK`) exige `CAP_NET_ADMIN`: un jvpn relanzado sin privilegios no puede ponerla, así que un reinicio necesita privilegios otra vez (se prueba así; mi primera idea de «reiniciar como nobody» era falsa con `FwMark`); (b) con `suppress_prefixlength 0` cualquier ruta específica en la tabla principal (la LAN, una ruta a un servidor de gestión) NO pasa por el túnel: es lo esperado pero hay que saberlo; (c) mientras jvpn está muerto el tráfico se pierde: es el comportamiento pedido, pero también corta el acceso a la propia máquina por esa ruta.
 **Límites reales:** la fuga por IPv6 se bloquea con una ruta pero NO se probó (los contenedores no tenían IPv6); DNS NO se configura ni se prueba (apunte `resolv.conf` a un servidor alcanzable por el túnel; un resolvedor local que consulte por fuera filtra los nombres); no hay prueba de fugas por tráfico local (broadcast, multicast), por el reinicio en caliente de las reglas (una ventana entre `ip link add` y `fullroute.sh up` en que el tráfico sale en claro), ni de un jvpn colgado (vivo pero sin atender): el interruptor cubre la MUERTE del proceso, no su bloqueo; no es un cortafuegos (no impide que otro proceso con privilegios cambie las rutas).
+
+## 7. V3: rendimiento medido, y qué lo limita (2026-11-26)
+
+**Método** (`tools/bench_tunnel.sh`, `jvpn bench`): `iperf3` TCP de un flujo y de cuatro, en los dos sentidos, entre contenedores de ESTA máquina (Ryzen 7 4700U, WSL2 anidado, docker), con el WireGuard del kernel como línea base; y en memoria, cifrar y abrir paquetes de 1 400 bytes sin red. Son cifras de este entorno, NO generales; no se comparó con `wireguard-go` ni BoringTun (no instalados).
+**Resultados** (tras `Sys.rotl32`; kernel y jvpn varían entre ejecuciones ±10 %):
+
+| Prueba | Mbit/s |
+|---|---|
+| kernel ↔ kernel, 1 flujo | 620–780 |
+| jvpn → kernel, 1 flujo (subida) | 210–235 |
+| jvpn ← kernel, 1 flujo (bajada) | 210–245 |
+| jvpn → kernel, 4 flujos (suma) | ≈ 230 (cada flujo ≈ 55–65) |
+| solo cifrar en memoria, 1 400 B, un núcleo | 547 → 675 (con rotaciones) |
+| solo abrir en memoria, con ventana | 676 → 861 |
+| apretones de manos completos (los dos lados) | ≈ 270–310 por segundo |
+
+jvpn: ≈ 22 MB de memoria residente, binario de 131 KB, un solo hilo al 100 % de un núcleo. Su CPU en las mediciones: ≈ 40 % en modo usuario (cifrado, copias, recolector) y ≈ 60 % en modo núcleo (una llamada al sistema por paquete en cada sentido, `read`/`sendto`/`recvfrom`/`write`, y la parte del receptor que la veth ejecuta en la misma CPU).
+**Conclusión honesta:** jvpn consigue ≈ 1/3 de la velocidad del kernel en este entorno. El cifrado ya no es el único límite (en memoria sube a 675 Mbit/s por núcleo; en el túnel real es ≈ 230): el resto es el coste por paquete de las llamadas al sistema y de reservar tres arreglos por paquete (`seal` copia el paquete cuatro veces). Lo que NO se hizo y es lo que daría más: (1) `recvmmsg`/`sendmmsg` y leer varios paquetes de la TUN por vuelta (llamadas al sistema nuevas en `Os`); (2) cifrar y abrir en un búfer fijo sin reservar (`ChaCha20Poly1305.sealInto/openInto`); (3) ChaCha20 con varios bloques a la vez/SIMD (instrucción nueva en los tres emisores); (4) varios trabajadores (`Worker`) por grupo de pares, que es el diseño previsto y multiplica por el número de núcleos solo si hay varios flujos. **No se afirma nada sobre hardware real** (ARM, RISC-V, una NIC de verdad): lo medido es un banco entre dos contenedores donde el kernel receptor corre en la CPU del emisor.

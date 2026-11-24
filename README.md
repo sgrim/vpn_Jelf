@@ -21,3 +21,7 @@ ip addr add 10.9.0.2/24 dev jt0 && ip link set jt0 up mtu 1420
 tools/fullroute.sh up jt0 51820                          # todo el tráfico sin marca va por el túnel
 ```
 Si `jvpn` muere, la interfaz y su ruta siguen y el tráfico se pierde (no sale en claro). Límites y qué no está probado (IPv6, DNS, la ventana al arrancar): `AUDITORIA.md` 6.
+
+## Rendimiento (medido en una máquina de pruebas, no general)
+
+`tools/bench_tunnel.sh` (iperf3 entre contenedores, el WireGuard del kernel como línea base) y `jvpn bench`: ≈ 230 Mbit/s por túnel frente a ≈ 700 del kernel en el mismo banco; 675 Mbit/s de cifrado por núcleo en memoria. Detalle, método y límites en `AUDITORIA.md` 7.

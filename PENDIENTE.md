@@ -16,7 +16,7 @@ Tamaños relativos: S < M < L < XL. Los riesgos de cada fase y su validación es
 - **Interruptor de seguridad y túnel completo: HECHOS (AUDITORIA.md 6)**; falta probar IPv6 y DNS, y cerrar la ventana entre crear la interfaz y poner las rutas.
 - Política de rutas IPv4 e IPv6, DNS por el túnel, interruptor si el túnel cae, MTU 1420.
 
-## 4. V3 — rendimiento (L)
+## 4. V3 — rendimiento (L): MEDIDO y rotaciones en una instrucción (AUDITORIA.md 7); faltan recvmmsg/sendmmsg, búfer fijo, ChaCha20 SIMD y trabajadores
 - ChaCha20-Poly1305 con SIMD y por lotes, lectura y escritura de varios paquetes, un `Worker` por grupo de pares; banco contra el kernel, `wireguard-go` y BoringTun (Gbit/s, CPU por Gbit, latencia, memoria).
 
 ## 5. V4 — endurecimiento (M)
