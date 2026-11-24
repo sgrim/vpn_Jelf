@@ -22,7 +22,7 @@ public class Jvpn {
 
   static void usage() {
     System.out.println(NAME + " " + VERSION + ": VPN compatible con WireGuard de la nube de jelf (línea de órdenes), nativa y sin dependencias (fase V0: el protocolo).");
-    System.out.println("órdenes: version, help, genkey, pubkey ARCHIVO, selftest, up, probe, listen");
+    System.out.println("órdenes: version, help, genkey, pubkey ARCHIVO, selftest, up, probe, listen, cookie-probe");
     System.out.println("  genkey                      escribe una clave privada nueva (base64, como «wg genkey»)");
     System.out.println("  pubkey ARCHIVO              escribe la clave pública de la privada que hay en ARCHIVO");
     System.out.println("  up ARCHIVO PUB_PAR --tun NOMBRE --allowed IPv4/BITS [--endpoint IPv4:PUERTO] [--listen PUERTO] [--keepalive SEG] [--user UID] [-v]");
@@ -80,6 +80,11 @@ public class Jvpn {
       up(args);
       return;
     }
+    if (o.equals("cookie-probe")) {
+      if (args.length < 4) bad("uso: cookie-probe ARCHIVO PUB_PAR IPv4:PUERTO [N]");
+      cookieProbe(readKey(args[1]), peerKey(args[2]), args[3], args.length > 4 ? Integer.parseInt(args[4]) : 30000);
+      return;
+    }
     if (o.equals("probe")) {
       if (args.length < 6) bad("uso: probe ARCHIVO PUB_PAR IPv4:PUERTO ORIGEN DESTINO [N]");
       probe(readKey(args[1]), peerKey(args[2]), args[3], args[4], args[5], args.length > 6 ? Integer.parseInt(args[6]) : 1);
@@ -118,6 +123,7 @@ public class Jvpn {
     Tunnel t = new Tunnel();
     for (int i = 3; i < a.length; i++) {
       if (a[i].equals("-v")) t.verbose = true;
+      else if (a[i].equals("--force-cookies")) t.forceCookies = true;
       else if (i + 1 >= a.length) bad("falta el valor de " + a[i]);
       else if (a[i].equals("--tun")) tunName = a[++i];
       else if (a[i].equals("--allowed")) allowed = a[++i];
@@ -159,6 +165,75 @@ public class Jvpn {
     System.out.println(NAME + ": " + t.rxPackets + " paquetes entregados a la TUN, " + t.txPackets + " enviados, " + t.rxDropped + " descartados");
   }
 
+  /**
+   * Prueba contra un respondedor REAL bajo carga (el kernel): inunda con N iniciaciones falsas pero con MAC1 válido (le cuestan una curva elíptica cada una), y justo después manda una iniciación verdadera SIN
+   * cookie. Un respondedor bajo carga debe contestar con una respuesta de cookie (no con la de apretón de manos); entonces se repite con MAC2 y debe contestar el apretón de manos. Sale 0 si todo ocurrió así.
+   */
+  static void cookieProbe(byte[] priv, byte[] peer, String endpoint, int count) {
+    int colon = endpoint.indexOf(':');
+    long ip = colon < 0 ? -1 : Net.parseIp(endpoint.substring(0, colon));
+    if (ip < 0) bad("el destino debe ser IPv4:PUERTO");
+    int port = Integer.parseInt(endpoint.substring(colon + 1));
+    int fd = Udp.bind(0, 0, true);
+    Net.recvTimeout(fd, 1500);
+    byte[] key1 = Wg.mac1Key(peer);
+    byte[][] pk = new byte[count][];
+    for (int i = 0; i < count; i++) {
+      byte[] m = Rand.bytes(Wg.INITIATION);
+      m[0] = 1;
+      m[1] = 0;
+      m[2] = 0;
+      m[3] = 0;
+      Wg.copy(Wg.mac(key1, m, 116), 0, m, 116, 16);
+      for (int j = 132; j < 148; j++) m[j] = 0;
+      pk[i] = m;
+    }
+    byte[] drain = new byte[2048];
+    int fakeReplies = 0;
+    Net.setBlocking(fd, false); // durante la inundación se vacía el socket a menudo: las respuestas de cookie a las falsas llenarían el búfer y taparían la de la verdadera
+    for (int i = 0; i < count; i++) {
+      Udp.sendTo(fd, (int) ip, port, pk[i], 0, Wg.INITIATION);
+      if ((i & 255) == 255) while (Udp.recvFrom(fd, drain, 0, drain.length) > 0) fakeReplies++;
+    }
+    Net.setBlocking(fd, true);
+    Net.recvTimeout(fd, 1500);
+    System.out.println(NAME + ": " + count + " iniciaciones falsas con MAC1 válido enviadas; el par ya contestó " + fakeReplies + " con cookies");
+    Handshake hs = new Handshake(priv, peer, psk());
+    byte[] init = hs.createInitiation();
+    Udp.sendTo(fd, (int) ip, port, init, 0, init.length);
+    byte[] buf = new byte[2048];
+    boolean cookie = false;
+    boolean answered = false;
+    int replies = 0;
+    long end = System.currentTimeMillis() + 4000;
+    while (System.currentTimeMillis() < end && !answered) {
+      int n = Udp.recvFrom(fd, buf, 0, buf.length);
+      if (n < 0) break;
+      if (n == Cookies.REPLY && buf[0] == 3) {
+        replies++;
+        if (!cookie && hs.consumeCookieReply(buf, n)) {
+          cookie = true;
+          System.out.println(NAME + ": cookie recibida y abierta (XChaCha20-Poly1305) entre " + replies + " respuestas de cookie");
+          init = hs.createInitiation();
+          Udp.sendTo(fd, (int) ip, port, init, 0, init.length);
+        }
+      } else if (n == Wg.RESPONSE && buf[0] == 2) {
+        if (!cookie) {
+          System.out.println(NAME + ": el par contestó el apretón de manos SIN pedir cookie: no estaba bajo carga (la prueba no vale)");
+          System.exit(3);
+        }
+        Session s = hs.consumeResponse(buf, n);
+        if (s != null) {
+          answered = true;
+          System.out.println(NAME + ": con el MAC2 de la cookie el par aceptó la iniciación: apretón de manos completo");
+        }
+      }
+    }
+    Udp.close(fd);
+    if (!cookie) System.out.println(NAME + ": no llegó ninguna respuesta de cookie válida (" + replies + " respuestas de cookie en total)");
+    System.exit(cookie && answered ? 0 : 1);
+  }
+
   static void probe(byte[] priv, byte[] peer, String endpoint, String src, String dst, int count) {
     int colon = endpoint.indexOf(':');
     if (colon < 0) bad("el destino debe ser IPv4:PUERTO");
@@ -179,6 +254,12 @@ public class Jvpn {
       if (n < 0) {
         System.out.println(NAME + ": sin respuesta al apretón de manos (¿clave del par distinta o puerto cerrado?)");
         System.exit(1);
+      }
+      if (n >= 1 && buf[0] == 3 && hs.consumeCookieReply(buf, n)) { // el par está bajo carga: se repite la iniciación con MAC2
+        System.out.println(NAME + ": el par pidió una cookie (bajo carga); se repite la iniciación con MAC2");
+        init = hs.createInitiation();
+        Udp.sendTo(fd, (int) ip, port, init, 0, init.length);
+        continue;
       }
       s = hs.consumeResponse(buf, n);
     }

@@ -19,6 +19,18 @@ public final class Handshake {
   final byte[] psk;
   final byte[] myMac1Key;
   final byte[] peerMac1Key;
+  /** Lado respondedor de las cookies (secreto por origen). */
+  public final Cookies cookies = new Cookies();
+  /** Lado iniciador: la última cookie recibida del par, su momento, y el MAC1 de la última iniciación (es el dato asociado de la respuesta de cookie). */
+  byte[] cookie;
+  long cookieTime;
+  byte[] lastMac1;
+  /** La respuesta de cookie preparada por consume() cuando devuelve COOKIE. */
+  public byte[] cookieReply;
+  public static final int REJECT = 0;
+  public static final int ACCEPT = 1;
+  public static final int COOKIE = 2;
+
   /** Última marca de tiempo aceptada del par (12 ceros al principio). */
   byte[] lastTimestamp = new byte[12];
   public long nowMillis; // para las pruebas: 0 = el reloj real
@@ -84,6 +96,11 @@ public final class Handshake {
     Wg.copy(ts, 0, m, 88, 28);
     byte[] mac1 = Wg.mac(peerMac1Key, m, 116);
     Wg.copy(mac1, 0, m, 116, 16);
+    lastMac1 = mac1;
+    if (cookie != null && now() - cookieTime < Cookies.SECRET_LIFE_MS) { // con una cookie vigente del par, el MAC2 la prueba (bajo carga el par lo exige)
+      byte[] mac2 = Wg.mac(cookie, m, 132);
+      Wg.copy(mac2, 0, m, 132, 16);
+    }
     this.ePriv = ep;
     this.c = cc;
     this.h = hh;
@@ -122,7 +139,39 @@ public final class Handshake {
     return new Session(t[0], t[1], localIndex, remote, true);
   }
 
+  /** Procesa una respuesta de cookie (tipo 3): si es para nuestra última iniciación y abre con la clave del par, guarda la cookie y devuelve true. */
+  public boolean consumeCookieReply(byte[] m, int len) {
+    if (!waiting || lastMac1 == null || len != Cookies.REPLY || m[0] != 3 || m[1] != 0 || m[2] != 0 || m[3] != 0) return false;
+    if (Wg.getLE32(m, 4) != localIndex) return false;
+    byte[] nonce = new byte[24];
+    Wg.copy(m, 8, nonce, 0, 24);
+    byte[] c = XChaCha20Poly1305.open(Wg.cookieKey(peerPub), nonce, lastMac1, m, 32, 32);
+    if (c == null || c.length != 16) return false;
+    cookie = c;
+    cookieTime = now();
+    return true;
+  }
+
   // ------------------------------------------------------------------ respondedor
+
+  /** ¿Es una iniciación del largo y tipo justos con MAC1 válido? Barato (un BLAKE2s): sirve para contar y limitar antes de gastar curvas elípticas. */
+  public boolean mac1Ok(byte[] m, int len) {
+    if (len != Wg.INITIATION || m[0] != 1 || m[1] != 0 || m[2] != 0 || m[3] != 0) return false;
+    return Wg.same(Wg.mac(myMac1Key, m, 116), 0, m, 116, 16);
+  }
+
+  /**
+   * Como consumeInitiation pero con cookies: bajo carga una iniciación SIN un MAC2 válido para su origen (ip, puerto) no se procesa; devuelve COOKIE y deja la respuesta en cookieReply.
+   * Devuelve REJECT si no vale y ACCEPT si se procesó (y sigue createResponse).
+   */
+  public int consume(byte[] m, int len, int ip, int port, boolean underLoad) {
+    if (!mac1Ok(m, len)) return REJECT;
+    if (underLoad && !cookies.mac2Valid(m, 132, ip, port, now())) {
+      cookieReply = cookies.reply(m, 116, ip, port, sPub, now());
+      return COOKIE;
+    }
+    return consumeInitiation(m, len) ? ACCEPT : REJECT;
+  }
 
   /** Procesa una iniciación (tipo 1); true si es del par configurado, con MAC1 y marca de tiempo válidas. Deja el estado para createResponse. */
   public boolean consumeInitiation(byte[] m, int len) {

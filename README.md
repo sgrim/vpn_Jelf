@@ -8,6 +8,6 @@
 
 ```
 ./build.sh   # compila con jelf (el compilador es compiladorELF) -> build/jvpn
-./test.sh    # reglas, pruebas propias del protocolo (14) y la prueba contra el WireGuard del kernel (docker; tools/wg_oracle.sh) y la de tráfico real por la TUN (tools/tun_oracle.sh)
+./test.sh    # reglas, pruebas propias del protocolo (19) y la prueba contra el WireGuard del kernel (docker; tools/wg_oracle.sh) y la de tráfico real por la TUN (tools/tun_oracle.sh)
 jvpn genkey > k; jvpn pubkey k          # claves como «wg genkey» y «wg pubkey»
 ```

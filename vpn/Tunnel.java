@@ -31,6 +31,7 @@ public final class Tunnel {
   int allowedMask;
   boolean verbose;
   int keepaliveSec;
+  boolean forceCookies; // para las pruebas: se comporta como si siempre estuviera bajo carga
 
   Session cur;
   long curSince;
@@ -140,12 +141,20 @@ public final class Tunnel {
     if (n < 4) return;
     int type = buf[0];
     if (type == 1) {
+      if (!hs.mac1Ok(buf, n)) return; // lo barato primero: sin MAC1 válido no se cuenta ni se gasta nada
       if (now - secStart >= 1000) {
         secStart = now;
         secCount = 0;
       }
-      if (++secCount > MAX_INITIATIONS_PER_SEC) return; // límite: cada iniciación cuesta varias multiplicaciones de curva
-      if (!hs.consumeInitiation(buf, n)) return;
+      if (++secCount > MAX_INITIATIONS_PER_SEC) return; // tope duro: cada iniciación cuesta varias multiplicaciones de curva
+      boolean load = forceCookies || secCount > MAX_INITIATIONS_PER_SEC / 4;
+      int res = hs.consume(buf, n, Udp.srcIp, Udp.srcPort, load);
+      if (res == Handshake.COOKIE) {
+        Udp.sendTo(udp, Udp.srcIp, Udp.srcPort, hs.cookieReply, 0, Cookies.REPLY);
+        log("bajo carga: respuesta de cookie enviada");
+        return;
+      }
+      if (res != Handshake.ACCEPT) return;
       byte[] r = hs.createResponse();
       if (r == null) return;
       peerIp = Udp.srcIp;
@@ -157,6 +166,11 @@ public final class Tunnel {
       curSince = now;
       handshaking = false;
       log("apretón de manos aceptado (respondedor)");
+    } else if (type == 3) {
+      if (handshaking && hs.consumeCookieReply(buf, n) && attempts < MAX_ATTEMPTS) {
+        log("cookie recibida: se repite la iniciación con MAC2");
+        startHandshake(now);
+      }
     } else if (type == 2) {
       Session s = hs.consumeResponse(buf, n);
       if (s == null) return;

@@ -50,8 +50,16 @@ a0=$(docker exec $A sh -c "cat /sys/class/net/wg0/statistics/rx_packets")
 docker exec $B ping -c 2 -W 1 10.9.0.99 > /dev/null 2>&1
 a1=$(docker exec $A sh -c "cat /sys/class/net/wg0/statistics/rx_packets")
 [ "$a0" = "$a1" ] && ok "un paquete hacia una dirección que el par no tiene permitida (10.9.0.99) no se envía por el túnel" || fail "destino no permitido: rx de wg0 $a0 -> $a1"
+# COOKIES al revés: jvpn responde 'bajo carga' (--force-cookies): el kernel INICIA, recibe la respuesta de cookie, repite con MAC2 y el túnel se establece
+docker exec $B sh -c "kill \$(pidof jvpn)"; sleep 1
+docker exec $B sh -c "ip link del jt0" > /dev/null 2>&1
+docker exec -d $B sh -c "/jvpn up /key '$KPUB' --tun jt0 --allowed 10.9.0.1/32 --listen 51821 --user 65534 --force-cookies -v > /log 2>&1"
+i=0; while [ $i -lt 30 ] && ! docker exec $B grep -q "privilegios soltados" /log 2>/dev/null; do sleep 0.3; i=$((i+1)); done
+docker exec $B sh -c "ip addr add 10.9.0.2/24 dev jt0 && ip link set jt0 up mtu 1420"
+out=$(docker exec $A sh -c "wg set wg0 peer '$OURPUB' remove; wg set wg0 peer '$OURPUB' allowed-ips 10.9.0.0/24 endpoint $BIP:51821; ping -c 1 -W 20 10.9.0.2" 2>&1)
+echo "$out" | grep -q "1 packets received" && docker exec $B grep -q "bajo carga: respuesta de cookie enviada" /log && docker exec $B grep -q "apretón de manos aceptado" /log && ok "COOKIES en el respondedor: jvpn (forzado a bajo carga) contesta con una cookie, el KERNEL la abre, repite con MAC2 y el ping pasa" || fail "cookies de jvpn: $out / $(docker exec $B cat /log)"
 # reinicio de jvpn: nueva sesión, el par antiguo del kernel la reconoce
-docker exec $B sh -c "kill $PID"; sleep 1
+docker exec $B sh -c "kill \$(pidof jvpn)"; sleep 1
 docker exec $B sh -c "ip link show jt0" > /dev/null 2>&1 && docker exec $B sh -c "ip link del jt0" > /dev/null 2>&1
 start_jvpn
 i=0; while [ $i -lt 30 ] && ! docker exec $B grep -q "privilegios soltados" /log 2>/dev/null; do sleep 0.3; i=$((i+1)); done

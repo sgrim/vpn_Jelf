@@ -250,6 +250,138 @@ public final class VpnTest {
     return ok;
   }
 
+  static boolean cookieFlow() {
+    Handshake[] p = pair(null);
+    p[0].nowMillis = 1700000000000L;
+    p[1].nowMillis = 1700000000000L;
+    int ip = 0x0a000001;
+    int port = 51234;
+    byte[] m1 = p[0].createInitiation();
+    boolean noLoad = p[1].consume(m1, m1.length, ip, port, false) == Handshake.ACCEPT; // sin carga no hace falta cookie
+    p[1] = pair(null)[1];
+    // bajo carga: otro respondedor con las MISMAS claves
+    Handshake[] q = pair(null);
+    q[0].nowMillis = 1700000000000L;
+    q[1].nowMillis = 1700000000000L;
+    byte[] a = q[0].createInitiation();
+    boolean needs = q[1].consume(a, a.length, ip, port, true) == Handshake.COOKIE && q[1].cookieReply != null && q[1].cookieReply.length == 64 && q[1].cookieReply[0] == 3;
+    byte[] reply = q[1].cookieReply;
+    boolean got = q[0].consumeCookieReply(reply, reply.length);
+    byte[] b = q[0].createInitiation();
+    boolean mac2set = false;
+    for (int i = 132; i < 148; i++) if (b[i] != 0) mac2set = true;
+    boolean accepted = q[1].consume(b, b.length, ip, port, true) == Handshake.ACCEPT;
+    byte[] resp = q[1].createResponse();
+    boolean full = resp != null && q[0].consumeResponse(resp, resp.length) != null;
+    return noLoad && needs && got && mac2set && accepted && full;
+  }
+
+  static boolean cookieBoundToSource() {
+    Handshake[] q = pair(null);
+    q[0].nowMillis = 1700000000000L;
+    q[1].nowMillis = 1700000000000L;
+    byte[] a = q[0].createInitiation();
+    q[1].consume(a, a.length, 0x0a000001, 40000, true);
+    q[0].consumeCookieReply(q[1].cookieReply, 64);
+    byte[] b = q[0].createInitiation();
+    boolean otherIp = q[1].consume(b, b.length, 0x0a000002, 40000, true) == Handshake.COOKIE; // la cookie es de OTRA dirección
+    boolean otherPort = q[1].consume(b, b.length, 0x0a000001, 40001, true) == Handshake.COOKIE;
+    boolean right = q[1].consume(b, b.length, 0x0a000001, 40000, true) == Handshake.ACCEPT;
+    // un MAC2 de ceros o con un bit cambiado nunca vale
+    Handshake[] r = pair(null);
+    byte[] c = r[0].createInitiation();
+    boolean zero = r[1].consume(c, c.length, 1, 1, true) == Handshake.COOKIE;
+    r[0].consumeCookieReply(r[1].cookieReply, 64);
+    byte[] d = r[0].createInitiation();
+    d[140] ^= 1;
+    boolean flipped = r[1].consume(d, d.length, 1, 1, true) == Handshake.COOKIE;
+    return otherIp && otherPort && right && zero && flipped;
+  }
+
+  static boolean cookieTamper() {
+    Handshake[] q = pair(null);
+    byte[] a = q[0].createInitiation();
+    q[1].consume(a, a.length, 5, 6, true);
+    byte[] reply = q[1].cookieReply;
+    int accepted = 0;
+    for (int i = 0; i < reply.length; i++) {
+      byte[] t = cut(reply, reply.length);
+      t[i] ^= 1;
+      if (q[0].consumeCookieReply(t, t.length)) accepted++;
+    }
+    boolean sizes = !q[0].consumeCookieReply(cut(reply, 63), 63) && !q[0].consumeCookieReply(reply, 65);
+    // una respuesta de cookie vieja no sirve para una iniciación nueva (otro MAC1 como dato asociado)
+    byte[] again = q[0].createInitiation();
+    boolean stale = !q[0].consumeCookieReply(reply, reply.length);
+    // y una cookie de otro par (otra clave pública de quien la envía) tampoco
+    Handshake[] other = pair(null);
+    byte[] o = other[0].createInitiation();
+    other[1].consume(o, o.length, 5, 6, true);
+    boolean foreign = !q[0].consumeCookieReply(other[1].cookieReply, 64);
+    return accepted == 0 && sizes && stale && foreign && q[0].consumeCookieReply(cut(reply, 64), 64) == false && again != null;
+  }
+
+  static boolean cookieExpiry() {
+    Handshake[] q = pair(null);
+    q[0].nowMillis = 1700000000000L;
+    q[1].nowMillis = 1700000000000L;
+    byte[] a = q[0].createInitiation();
+    q[1].consume(a, a.length, 9, 9, true);
+    q[0].consumeCookieReply(q[1].cookieReply, 64);
+    q[0].nowMillis += 121000L; // la cookie del iniciador tiene más de 120 s: no se usa (MAC2 en ceros)
+    byte[] b = q[0].createInitiation();
+    boolean zero = true;
+    for (int i = 132; i < 148; i++) if (b[i] != 0) zero = false;
+    // y el secreto del respondedor rota: una cookie de hace más de 120 s ya no vale
+    q[0].nowMillis = 1700000000000L;
+    Handshake[] r = pair(null);
+    r[0].nowMillis = 1700000000000L;
+    r[1].nowMillis = 1700000000000L;
+    byte[] c = r[0].createInitiation();
+    r[1].consume(c, c.length, 9, 9, true);
+    r[0].consumeCookieReply(r[1].cookieReply, 64);
+    r[0].nowMillis = 1700000100000L;
+    r[1].nowMillis = 1700000100000L;
+    byte[] d = r[0].createInitiation();
+    boolean freshOk = r[1].consume(d, d.length, 9, 9, true) == Handshake.ACCEPT;
+    r[0].nowMillis = 1700000130000L;
+    r[1].nowMillis = 1700000130000L;
+    byte[] e = r[0].createInitiation();
+    boolean rotated = r[1].consume(e, e.length, 9, 9, true) == Handshake.COOKIE;
+    // el secreto del respondedor rota aunque la cookie del iniciador aún sea vigente para él (secreto de 100 s al darla; a los 60 s siguientes tiene 160 s)
+    Handshake[] s = pair(null);
+    s[0].nowMillis = 1700000000000L;
+    s[1].nowMillis = 1700000000000L;
+    s[1].cookies.cookie(9, 9, 1700000000000L - 100000L);
+    byte[] f = s[0].createInitiation();
+    s[1].consume(f, f.length, 9, 9, true);
+    s[0].consumeCookieReply(s[1].cookieReply, 64);
+    s[0].nowMillis = 1700000060000L;
+    s[1].nowMillis = 1700000060000L;
+    byte[] g = s[0].createInitiation();
+    boolean rotatedUnderValidCookie = g[132] != 0 || g[133] != 0 || g[134] != 0;
+    boolean secretRotates = rotatedUnderValidCookie && s[1].consume(g, g.length, 9, 9, true) == Handshake.COOKIE;
+    // cada respuesta de cookie lleva un nonce NUEVO (un nonce repetido con la misma clave rompe la seguridad del AEAD)
+    Handshake[] t = pair(null);
+    byte[] h1 = t[0].createInitiation();
+    t[1].consume(h1, h1.length, 3, 3, true);
+    byte[] r1 = t[1].cookieReply;
+    t[1].consume(h1, h1.length, 3, 3, true);
+    byte[] r2 = t[1].cookieReply;
+    boolean freshNonce = !Wg.same(r1, 8, r2, 8, 24);
+    return zero && freshOk && rotated && secretRotates && freshNonce;
+  }
+
+  static boolean xchachaCookie() {
+    byte[] key = rb(32);
+    byte[] nonce = rb(24);
+    byte[] aad = rb(16);
+    byte[] pt = rb(16);
+    byte[] ct = XChaCha20Poly1305.seal(key, nonce, aad, pt, 0, 16);
+    byte[] back = XChaCha20Poly1305.open(key, nonce, aad, ct, 0, ct.length);
+    return ct.length == 32 && back != null && Wg.same(back, 0, pt, 0, 16);
+  }
+
   public static boolean run() {
     check("APRETÓN DE MANOS: iniciador y respondedor (Noise_IKpsk2) derivan las mismas claves; los datos van en los dos sentidos, con relleno a 16 y la etiqueta", handshakes());
     check("CLAVE PRECOMPARTIDA: con la misma funciona; con otra, el iniciador no abre la respuesta", psk());
@@ -265,6 +397,11 @@ public final class VpnTest {
     check("LÍMITE de mensajes: la sesión deja de emitir en REJECT_AFTER y el receptor lo rechaza", limits());
     check("KDF: τ1, τ2 y τ3 son los de HMAC-BLAKE2s de la especificación", kdfVectors());
     check("CODIFICACIONES: base64 de claves, TAI64N, y el ICMP echo con sus checksums", encodings());
+    check("COOKIES: bajo carga una iniciación sin MAC2 recibe una respuesta de cookie (tipo 3, 64 bytes), el iniciador la abre, repite con MAC2 y el respondedor la acepta y completa el apretón de manos; sin carga no hace falta", cookieFlow());
+    check("COOKIES ligadas al ORIGEN: otra IP u otro puerto, un MAC2 de ceros o con un bit cambiado vuelven a pedir cookie", cookieBoundToSource());
+    check("COOKIES manipuladas: cada bit de la respuesta, otro largo, una respuesta vieja para una iniciación nueva y la de otro par se rechazan", cookieTamper());
+    check("COOKIES con tiempo: la del iniciador no se usa pasados 120 s y el secreto del respondedor rota (cookie vieja inválida)", cookieExpiry());
+    check("XChaCha20-Poly1305 de 24 bytes de nonce, ida y vuelta (la validación de fondo está en edge_Jelf y en el kernel)", xchachaCookie());
     System.out.println("jvpn selftest: " + (total - bad) + " de " + total);
     return bad == 0;
   }

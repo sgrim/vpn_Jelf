@@ -22,6 +22,12 @@ docker exec $NAME wg show wg0 | grep -q "latest handshake" && ok "el kernel regi
 # 2) clave del par equivocada: no hay respuesta
 out=$(timeout 30 build/jvpn probe $T/key "$(build/jvpn genkey | tr -d '\n' > $T/x; build/jvpn pubkey $T/x)" 127.0.0.1:51820 10.9.0.2 10.9.0.1 1 2>&1); rc=$?
 [ $rc -ne 0 ] && echo "$out" | grep -q "sin respuesta" && ok "con otra clave pública del par el kernel NO responde (MAC1 inválido)" || fail "clave equivocada: rc=$rc $out"
+# 2b) COOKIES: el kernel bajo carga (inundado con iniciaciones falsas de MAC1 válido) contesta con respuestas de cookie; jvpn las abre (XChaCha20-Poly1305) y repite con MAC2 válido
+KIP=$(docker inspect -f "{{.NetworkSettings.Networks.bridge.IPAddress}}" $NAME)
+out=$(timeout 60 build/jvpn cookie-probe $T/key "$KPUB" $KIP:51820 20000 2>&1); rc=$?
+if [ $rc -ne 0 ]; then sleep 3; out=$(timeout 60 build/jvpn cookie-probe $T/key "$KPUB" $KIP:51820 60000 2>&1); rc=$?; fi
+[ $rc -eq 0 ] && echo "$out" | grep -q "cookie recibida y abierta" && echo "$out" | grep -q "el par aceptó la iniciación" && ok "COOKIES contra el kernel bajo carga: la respuesta de cookie (XChaCha20-Poly1305) se abre y con el MAC2 el kernel acepta la iniciación ($(echo "$out" | head -1 | sed "s/jvpn: //"))" || fail "cookies contra el kernel: rc=$rc $out"
+sleep 3
 # 3) el kernel INICIA: jvpn escucha y contesta
 HOSTIP=$(docker exec $NAME ip route | awk '/default/ {print $3}')
 build/jvpn listen $T/key "$KPUB" 51821 10.9.0.2 3 > $T/listen.log 2>&1 &

@@ -14,6 +14,7 @@ public final class Wg {
   public static final byte[] CONSTRUCTION = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s".getBytes();
   public static final byte[] IDENTIFIER = "WireGuard v1 zx2c4 Jason@zx2c4.com".getBytes();
   public static final byte[] LABEL_MAC1 = "mac1----".getBytes();
+  public static final byte[] LABEL_COOKIE = "cookie--".getBytes();
   public static final int INITIATION = 148;
   public static final int RESPONSE = 92;
   public static final int DATA_HEADER = 16;
@@ -62,6 +63,11 @@ public final class Wg {
   }
 
   /** La clave de MAC1 de quien RECIBE: HASH("mac1----" ‖ su clave pública). */
+  /** La clave de las respuestas de cookie de quien las ENVÍA: HASH("cookie--" ‖ su clave pública). */
+  public static byte[] cookieKey(byte[] senderPub) {
+    return hash(LABEL_COOKIE, senderPub);
+  }
+
   public static byte[] mac1Key(byte[] receiverPub) {
     return hash(LABEL_MAC1, receiverPub);
   }
