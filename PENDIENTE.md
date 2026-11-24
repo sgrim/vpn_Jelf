@@ -5,7 +5,7 @@ Tamaños relativos: S < M < L < XL. Los riesgos de cada fase y su validación es
 ## 0. Requisitos en `edge_Jelf` (M) — HECHO el 2026-11-26 salvo XChaCha20 (edge_Jelf AUDITORIA 4)
 - **X25519**, **ChaCha20-Poly1305**, **HKDF** y **BLAKE2s** (más el `XChaCha20-Poly1305` de las cookies), con los vectores oficiales y con la JVM 26 y OpenSSL como comparadores.
 
-## 1. V0 — el protocolo (L)
+## 1. V0 — el protocolo (L): HECHO el núcleo (AUDITORIA.md 2); faltan cookies y MAC2 (R-V02), temporizadores y reintentos, varios pares, itinerancia
 - Apretón de manos Noise_IKpsk2 (iniciador y respondedor), mensajes de datos con contador y ventana antirrepetición de 2000, marcas TAI64N, cookies y `MAC1`/`MAC2`, temporizadores (renovación, rechazo, keepalive).
 - **Salida:** apretón de manos y paquetes de datos en los dos sentidos con el **WireGuard del kernel** (espacio de nombres de red).
 
