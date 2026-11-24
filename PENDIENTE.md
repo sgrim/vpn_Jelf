@@ -2,7 +2,7 @@
 
 Tamaños relativos: S < M < L < XL. Los riesgos de cada fase y su validación están en `RIESGOS.md` (una fase no se da por terminada si deja un riesgo de gravedad alta sin su prueba).
 
-## 0. Requisitos en `edge_Jelf` (M) — los hago primero
+## 0. Requisitos en `edge_Jelf` (M) — HECHO el 2026-11-26 salvo XChaCha20 (edge_Jelf AUDITORIA 4)
 - **X25519**, **ChaCha20-Poly1305**, **HKDF** y **BLAKE2s** (más el `XChaCha20-Poly1305` de las cookies), con los vectores oficiales y con la JVM 26 y OpenSSL como comparadores.
 
 ## 1. V0 — el protocolo (L)
