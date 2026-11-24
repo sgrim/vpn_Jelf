@@ -48,11 +48,16 @@ start() { docker exec -d $B sh -c "/jvpn up /wg.conf --tun jt0 --user 65534 $1 -
 connect() { docker exec -d $B sh -c "(sleep 3 | nc -w 4 $NET 7000) > /dev/null 2>&1"; sleep 1.5; }
 seen() { docker exec $X sh -c "cat /proc/net/tcp /proc/net/tcp6 | grep -c '$(hex $1):[0-9A-F]\\{4\\} 0[1-9] '" 2>/dev/null; }
 settle() { sleep 3.5; }
-# 1) túnel completo con interfaz persistente
+# 0) SIN VENTANA: la interfaz persistente y las rutas se crean ANTES de arrancar jvpn (ip tuntap), con el túnel completo desde el primer instante: hasta que jvpn arranque el tráfico se pierde, no sale en claro
+docker exec $B sh -c "ip tuntap add dev jt0 mode tun user 65534 && ip addr add 10.9.0.2/24 dev jt0 && ip link set jt0 up mtu 1420 && /fullroute.sh up jt0 51820" || { fail "no se prepara la interfaz persistente"; exit 1; }
+a0=$(seen 10.9.0.2); b0=$(seen $BIP)
+connect; a1=$(seen 10.9.0.2); b1=$(seen $BIP); settle
+docker exec $B ping -c 2 -W 1 $NET > /dev/null 2>&1; pr=$?
+[ "$a0" = "$a1" ] && [ "$b0" = "$b1" ] && [ $pr -ne 0 ] && ok "SIN VENTANA: con las rutas puestas antes de arrancar jvpn, hasta que arranca el tráfico no llega a T por ningún camino (ni en claro ni por el túnel)" || fail "ventana al arrancar: T ve directo $b0->$b1, túnel $a0->$a1, ping=$pr"
+# 1) túnel completo con interfaz persistente (jvpn se une a la que ya existe)
 start "--persist"
 docker exec $B grep -q "PERSISTENTE" /log && ok "jvpn hace la interfaz persistente (dueño: el usuario sin privilegios) y suelta los privilegios" || { fail "no arranca persistente: $(docker exec $B cat /log)"; exit 1; }
-docker exec $B sh -c "ip addr add 10.9.0.2/24 dev jt0 && ip link set jt0 up mtu 1420 && /fullroute.sh up jt0 51820" || { fail "no se instalan las rutas"; exit 1; }
-sleep 1
+sleep 2
 connect; a=$(seen 10.9.0.2); b=$(seen $BIP); settle
 [ "$a" -ge 1 ] && [ "$b" = 0 ] && ok "con el túnel completo, la conexión a «Internet» llega a T desde 10.9.0.2 (salió por el túnel y la salida S) y no desde la dirección normal de B" || fail "túnel completo: visto-por-túnel=$a visto-directo=$b"
 # 2) jvpn MUERE: la interfaz persiste y no hay fuga

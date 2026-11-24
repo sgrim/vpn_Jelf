@@ -18,6 +18,7 @@ K=$(mktemp -d /tmp/jvpn_k.XXXXXX); build/jvpn genkey > $K/k; [ $(wc -c < $K/k) =
 echo "dwdtCnMYpX08FsFyUbJmRd9ML4frwJkqsXf7pR25LCo=" > $K/a; [ "$(build/jvpn pubkey $K/a)" = "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=" ] && ok "pubkey: el vector de RFC 7748 (Alice)" || fail "pubkey: vector de RFC 7748"
 rm -rf $K
 $(dirname "$0")/tools/wg_oracle.sh > /tmp/jvpn_oracle.txt 2>&1; cat /tmp/jvpn_oracle.txt; grep -q "^FALLA" /tmp/jvpn_oracle.txt && bad=1
+$(dirname "$0")/tools/ipv6_oracle.sh > /tmp/jvpn_v6.txt 2>&1; cat /tmp/jvpn_v6.txt; grep -q "^FALLA" /tmp/jvpn_v6.txt && bad=1
 $(dirname "$0")/tools/killswitch_oracle.sh > /tmp/jvpn_ks.txt 2>&1; cat /tmp/jvpn_ks.txt; grep -q "^FALLA" /tmp/jvpn_ks.txt && bad=1
 $(dirname "$0")/tools/tun_oracle.sh > /tmp/jvpn_tun.txt 2>&1; cat /tmp/jvpn_tun.txt; grep -q "^FALLA" /tmp/jvpn_tun.txt && bad=1
 [ -f RIESGOS.md ] && grep -q "^| R-" RIESGOS.md && ok "RIESGOS.md existe y tiene riesgos anotados ($(grep -c '^| R-' RIESGOS.md))" || fail "RIESGOS.md"
