@@ -131,6 +131,15 @@ public class Jvpn {
     for (int i = 0; i < raw.length; i++) raw[i] = 0;
     if (c.error != null) bad("configuración inválida: " + c.error);
     if (c.warnings.length() > 0) System.err.print(c.warnings.toString());
+    for (int i = 0; i < c.peerCount; i++) { // los Endpoint con NOMBRE se resuelven una vez, antes de soltar privilegios y de crear nada
+      Config.PeerConf pc = c.peers[i];
+      if (pc.endpointHost != null) {
+        long ip = Dns.resolve(pc.endpointHost);
+        if (ip < 0) bad("no se pudo resolver el Endpoint «" + pc.endpointHost + "»: " + Dns.describe(ip));
+        pc.endpointIp = (int) ip;
+        System.out.println(NAME + ": " + pc.endpointHost + " = " + Dns.describe(ip) + " (se resuelve solo al arrancar)");
+      }
+    }
     t.setup(c);
     t.udp = Udp.bind(0, c.listenPort, false);
     if (t.udp < 0) bad("no se pudo abrir el socket UDP (error " + (-t.udp) + ")");

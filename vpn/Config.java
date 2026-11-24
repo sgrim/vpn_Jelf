@@ -24,6 +24,8 @@ public final class Config {
     public int routes;
     public boolean hasEndpoint;
     public int endpointIp;
+    /** Si el Endpoint era un NOMBRE: el nombre (se resuelve al arrancar, una sola vez; endpointIp vale 0 hasta entonces). */
+    public String endpointHost;
     public int endpointPort;
     public int keepalive;
     public int line;
@@ -211,14 +213,16 @@ public final class Config {
           }
         } else if (k.equals("endpoint")) {
           int colon = v.lastIndexOf(':');
-          long ip = colon < 0 ? -1 : Net.parseIp(v.substring(0, colon));
+          String hostPart = colon < 0 ? "" : v.substring(0, colon);
+          long ip = colon < 0 ? -1 : Net.parseIp(hostPart);
           int port = colon < 0 ? -1 : parseInt(v.substring(colon + 1), 65535);
-          if (ip < 0 || port <= 0) {
-            fail(line, "Endpoint debe ser IPv4:PUERTO (los nombres de host todavía no se resuelven)");
+          if (port <= 0 || (ip < 0 && !Dns.validName(hostPart))) {
+            fail(line, "Endpoint debe ser IPv4:PUERTO o NOMBRE:PUERTO (IPv6 todavía no)");
             return;
           }
           cur.hasEndpoint = true;
-          cur.endpointIp = (int) ip;
+          if (ip >= 0) cur.endpointIp = (int) ip;
+          else cur.endpointHost = hostPart;
           cur.endpointPort = port;
         } else if (k.equals("persistentkeepalive")) {
           int p = parseInt(v, 65535);

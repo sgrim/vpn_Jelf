@@ -448,6 +448,8 @@ public final class VpnTest {
 
   static boolean configParsing() {
     Config ok = Config.parse(cfg(peerBlock("10.9.0.0/24, 192.168.1.0/30", "Endpoint = 1.2.3.4:51820\nPersistentKeepalive = 25\n") + "\n# otro\n" + peerBlock("10.8.0.1/32", "")));
+    Config named = Config.parse(cfg(peerBlock("10.9.0.0/24", "Endpoint = vpn.Ejemplo.test:51820\n")));
+    boolean hostOk = named.error == null && named.peers[0].hasEndpoint && "vpn.Ejemplo.test".equals(named.peers[0].endpointHost) && named.peers[0].endpointPort == 51820 && named.peers[0].endpointIp == 0;
     boolean good = ok.error == null && ok.peerCount == 2 && ok.listenPort == 51821 && ok.peers[0].routes == 2 && ok.peers[0].keepalive == 25 && ok.peers[0].endpointPort == 51820 && ok.peers[0].endpointIp == Ip.addr("1.2.3.4") && !ok.peers[1].hasEndpoint;
     Config w = Config.parse("[Interface]\nPrivateKey = " + B64.encode(Handshake.newPriv()) + "\nAddress = 10.9.0.2/24\nDNS = 1.1.1.1\nListenPort = 5\n" + peerBlock("10.9.0.1/32", ""));
     boolean warn = w.error == null && w.warnings.toString().indexOf("Address") >= 0 && w.warnings.toString().indexOf("DNS") >= 0;
@@ -455,7 +457,7 @@ public final class VpnTest {
     String[] bad = {
       "", "[Interface]\nPrivateKey = " + key + "\n", cfg(""), cfg("[Peer]\nAllowedIPs = 10.0.0.0/8\n"), cfg(peerBlock("", "")),
       cfg(peerBlock("10.9.0.0/24", "Nombre = x\n")), cfg(peerBlock("10.9.0.1/24", "")), cfg(peerBlock("10.9.0.0/33", "")), cfg(peerBlock("::/0", "")), cfg(peerBlock("10.9.0.0/24,,10.1.0.0/16", "")),
-      cfg(peerBlock("10.9.0.0/24", "Endpoint = host.ejemplo:51820\n")), cfg(peerBlock("10.9.0.0/24", "Endpoint = 1.2.3.4:0\n")), cfg(peerBlock("10.9.0.0/24", "PersistentKeepalive = x\n")),
+      cfg(peerBlock("10.9.0.0/24", "Endpoint = 1.2.3.4:0\n")), cfg(peerBlock("10.9.0.0/24", "Endpoint = ho st:51820\n")), cfg(peerBlock("10.9.0.0/24", "Endpoint = [::1]:51820\n")), cfg(peerBlock("10.9.0.0/24", "Endpoint = nombre-sin-puerto\n")), cfg(peerBlock("10.9.0.0/24", "PersistentKeepalive = x\n")),
       cfg(peerBlock("10.9.0.0/24", "")) + peerBlock("10.9.0.0/24", ""), cfg("[Peer]\nPublicKey = abc\nAllowedIPs = 10.0.0.0/8\n"),
       "PrivateKey = " + key + "\n", "[Interface]\nPrivateKey = " + key + "\nPrivateKey = " + key + "\n" + peerBlock("10.0.0.0/8", ""), "[Interface]\nPrivateKey = corta\n" + peerBlock("10.0.0.0/8", ""),
       "[Interface]\nPrivateKey = " + key + "\nListenPort = 70000\n" + peerBlock("10.0.0.0/8", ""), "[Interfaz]\n", cfg(peerBlock("10.9.0.0/24", "") + "[Interface]\n")
@@ -474,7 +476,7 @@ public final class VpnTest {
     String samePeer = cfg("[Peer]\nPublicKey = " + pk + "\nAllowedIPs = 10.1.0.0/16\n[Peer]\nPublicKey = " + pk + "\nAllowedIPs = 10.2.0.0/16\n");
     boolean dupRejected = Config.parse(samePeer).error != null;
     if (accepted != 0) System.out.println("       configuraciones inválidas aceptadas:" + why);
-    return good && warn && accepted == 0 && dupRejected;
+    return good && hostOk && warn && accepted == 0 && dupRejected;
   }
 
   static boolean routing() {

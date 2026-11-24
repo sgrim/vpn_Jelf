@@ -36,10 +36,11 @@ Endpoint = $AIP:51820
 [Peer]
 PublicKey = $K2P
 AllowedIPs = 10.9.1.1/32, 10.9.7.0/24
-Endpoint = $A2IP:51820
+Endpoint = kernela2.prueba:51820
 EOC
 chmod 600 $T/wg.conf
 docker cp build/jvpn $B:/jvpn > /dev/null; docker cp $T/wg.conf $B:/wg.conf > /dev/null
+docker exec $B sh -c "echo '$A2IP kernela2.prueba' >> /etc/hosts" # el Endpoint del par 2 es un NOMBRE: jvpn lo resuelve al arrancar (con /etc/hosts de B)
 # configuración con permisos abiertos: se rechaza con la causa
 docker exec $B chmod 644 /wg.conf
 out=$(docker exec $B timeout 5 /jvpn up /wg.conf --tun jt0 --user 65534 2>&1); rc=$?
@@ -50,6 +51,7 @@ wait_up() { i=0; while [ $i -lt 30 ] && ! docker exec $B grep -q "privilegios so
 start_jvpn ""
 wait_up
 docker exec $B grep -q "privilegios soltados (uid 65534)" /log && ok "jvpn lee la configuración de dos pares, crea la TUN con privilegios y los suelta antes del primer paquete" || { fail "no arranca: $(docker exec $B cat /log)"; exit 1; }
+docker exec $B grep -q "kernela2.prueba = $A2IP" /log && ok "un Endpoint con NOMBRE (kernela2.prueba) se resuelve al arrancar con /etc/hosts y el túnel con ese par funciona" || fail "Endpoint con nombre: $(docker exec $B head -3 /log)"
 docker exec $B grep -q "AVISO.*Address" /log && ok "Address de la configuración se avisa y NO se aplica" || fail "no avisa de Address"
 PID=$(docker exec $B pidof jvpn)
 uid=$(docker exec $B sh -c "grep '^Uid:' /proc/$PID/status | cut -f2-5 | tr '\t' ' '")
