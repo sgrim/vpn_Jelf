@@ -22,9 +22,11 @@ public class Jvpn {
 
   static void usage() {
     System.out.println(NAME + " " + VERSION + ": VPN compatible con WireGuard de la nube de jelf (línea de órdenes), nativa y sin dependencias (fase V0: el protocolo).");
-    System.out.println("órdenes: version, help, genkey, pubkey ARCHIVO, selftest, probe, listen");
+    System.out.println("órdenes: version, help, genkey, pubkey ARCHIVO, selftest, up, probe, listen");
     System.out.println("  genkey                      escribe una clave privada nueva (base64, como «wg genkey»)");
     System.out.println("  pubkey ARCHIVO              escribe la clave pública de la privada que hay en ARCHIVO");
+    System.out.println("  up ARCHIVO PUB_PAR --tun NOMBRE --allowed IPv4/BITS [--endpoint IPv4:PUERTO] [--listen PUERTO] [--keepalive SEG] [--user UID] [-v]");
+    System.out.println("      túnel de un par entre la interfaz TUN y UDP (hace falta CAP_NET_ADMIN para crearla; --user suelta los privilegios después)");
     System.out.println("  probe ARCHIVO PUB_PAR IPv4:PUERTO ORIGEN DESTINO [N]   apretón de manos con el par y N pings (ICMP) por el túnel de ORIGEN a DESTINO");
     System.out.println("  listen ARCHIVO PUB_PAR PUERTO DIRECCION [N]             responde apretones de manos y contesta N pings dirigidos a DIRECCION (0 = sin fin)");
   }
@@ -74,6 +76,10 @@ public class Jvpn {
     if (o.equals("selftest")) {
       System.exit(VpnTest.run() ? 0 : 1);
     }
+    if (o.equals("up")) {
+      up(args);
+      return;
+    }
     if (o.equals("probe")) {
       if (args.length < 6) bad("uso: probe ARCHIVO PUB_PAR IPv4:PUERTO ORIGEN DESTINO [N]");
       probe(readKey(args[1]), peerKey(args[2]), args[3], args[4], args[5], args.length > 6 ? Integer.parseInt(args[6]) : 1);
@@ -86,6 +92,71 @@ public class Jvpn {
     }
     System.out.println(NAME + ": orden desconocida «" + o + "»; use «" + NAME + " help» para ver las órdenes");
     System.exit(2);
+  }
+
+  static int parseCidr(String s, int[] out) {
+    int slash = s.indexOf('/');
+    if (slash < 0) return -1;
+    long ip = Net.parseIp(s.substring(0, slash));
+    int bits = Integer.parseInt(s.substring(slash + 1));
+    if (ip < 0 || bits < 0 || bits > 32) return -1;
+    out[1] = bits == 0 ? 0 : (int) (0xffffffffL << (32 - bits));
+    out[0] = (int) ip & out[1];
+    return 0;
+  }
+
+  static void up(String[] a) {
+    if (a.length < 3) bad("uso: up ARCHIVO PUB_PAR --tun NOMBRE --allowed IPv4/BITS [--endpoint IPv4:PUERTO] [--listen PUERTO] [--keepalive SEG] [--user UID] [--max-packets N] [-v]");
+    byte[] priv = readKey(a[1]);
+    byte[] peer = peerKey(a[2]);
+    String tunName = null;
+    String allowed = null;
+    String endpoint = null;
+    int listen = 0;
+    int uid = -1;
+    long max = 0;
+    Tunnel t = new Tunnel();
+    for (int i = 3; i < a.length; i++) {
+      if (a[i].equals("-v")) t.verbose = true;
+      else if (i + 1 >= a.length) bad("falta el valor de " + a[i]);
+      else if (a[i].equals("--tun")) tunName = a[++i];
+      else if (a[i].equals("--allowed")) allowed = a[++i];
+      else if (a[i].equals("--endpoint")) endpoint = a[++i];
+      else if (a[i].equals("--listen")) listen = Integer.parseInt(a[++i]);
+      else if (a[i].equals("--keepalive")) t.keepaliveSec = Integer.parseInt(a[++i]);
+      else if (a[i].equals("--user")) uid = Integer.parseInt(a[++i]);
+      else if (a[i].equals("--max-packets")) max = Long.parseLong(a[++i]);
+      else bad("opción desconocida «" + a[i] + "»");
+    }
+    if (tunName == null || allowed == null) bad("faltan --tun y --allowed");
+    int[] net = new int[2];
+    if (parseCidr(allowed, net) < 0) bad("--allowed debe ser IPv4/BITS");
+    t.allowedNet = net[0];
+    t.allowedMask = net[1];
+    if (endpoint != null) {
+      int c = endpoint.indexOf(':');
+      long ip = c < 0 ? -1 : Net.parseIp(endpoint.substring(0, c));
+      if (ip < 0) bad("--endpoint debe ser IPv4:PUERTO");
+      t.peerIp = (int) ip;
+      t.peerPort = Integer.parseInt(endpoint.substring(c + 1));
+      t.haveEndpoint = true;
+    }
+    t.hs = new Handshake(priv, peer, psk());
+    t.udp = Udp.bind(0, listen, false);
+    if (t.udp < 0) bad("no se pudo abrir el socket UDP (error " + (-t.udp) + ")");
+    t.tun = Tun.open(tunName);
+    if (t.tun < 0) bad("no se pudo crear la interfaz TUN «" + tunName + "» (error " + (-t.tun) + "; hace falta CAP_NET_ADMIN y /dev/net/tun)");
+    Tun.setBlocking(t.tun, false);
+    System.out.println(NAME + ": interfaz " + Tun.name + " creada, UDP " + Udp.localPort(t.udp));
+    if (uid > 0) {
+      if (!Tun.dropPrivileges(uid, uid)) bad("no se pudieron soltar los privilegios (uid " + uid + ")");
+      System.out.println(NAME + ": privilegios soltados (uid " + uid + ")");
+    } else {
+      System.out.println(NAME + ": AVISO: corre con los privilegios con que se lanzó; use --user UID");
+    }
+    System.out.flush();
+    t.run(max);
+    System.out.println(NAME + ": " + t.rxPackets + " paquetes entregados a la TUN, " + t.txPackets + " enviados, " + t.rxDropped + " descartados");
   }
 
   static void probe(byte[] priv, byte[] peer, String endpoint, String src, String dst, int count) {

@@ -9,7 +9,7 @@ Tamaños relativos: S < M < L < XL. Los riesgos de cada fase y su validación es
 - Apretón de manos Noise_IKpsk2 (iniciador y respondedor), mensajes de datos con contador y ventana antirrepetición de 2000, marcas TAI64N, cookies y `MAC1`/`MAC2`, temporizadores (renovación, rechazo, keepalive).
 - **Salida:** apretón de manos y paquetes de datos en los dos sentidos con el **WireGuard del kernel** (espacio de nombres de red).
 
-## 2. V1 — la herramienta en modo usuario (L)
+## 2. V1 — la herramienta en modo usuario (L): HECHO el núcleo (AUDITORIA.md 3); faltan varios pares, archivo de configuración con permisos 0600, `show`/`set`, IPv6, cookies
 - `jvpn genkey`, `pubkey`, `up CONFIG`, `show`, `set`; interfaz TUN, socket UDP, soltar privilegios antes del primer paquete, archivo de configuración con permisos 0600.
 
 ## 3. V2 — rutas, DNS y tamaños (M)
