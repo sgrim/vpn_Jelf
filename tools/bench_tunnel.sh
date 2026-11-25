@@ -36,7 +36,7 @@ Endpoint = $AIP:51820
 EOC
 chmod 600 $T/wg.conf
 docker cp build/jvpn $B:/jvpn > /dev/null; docker cp $T/wg.conf $B:/wg.conf > /dev/null
-docker exec -d $B sh -c "/jvpn up /wg.conf --tun jt0 --user 65534 > /log 2>&1"
+docker exec -d $B sh -c "/jvpn up /wg.conf --tun jt0 --user 65534 $JVPN_OPTS > /log 2>&1"
 i=0; while [ $i -lt 30 ] && ! docker exec $B grep -q "privilegios soltados" /log 2>/dev/null; do sleep 0.3; i=$((i+1)); done
 docker exec $B sh -c "ip addr add 10.9.0.2/24 dev jt0 && ip link set jt0 up mtu 1420"
 docker exec $A ping -c 2 -W 3 10.9.0.2 > /dev/null 2>&1; docker exec $K ping -c 2 -W 3 10.9.0.1 > /dev/null 2>&1
@@ -61,3 +61,4 @@ r=$(iperf $B 10.9.0.1 "-P 4"); echo "jvpn   -> kernel      (4 flujos, subida): $
 c1u=$(docker exec $B sh -c "awk '{print \$14}' /proc/$PID/stat"); c1s=$(docker exec $B sh -c "awk '{print \$15}' /proc/$PID/stat")
 rss=$(docker exec $B sh -c "grep VmRSS /proc/$PID/status | awk '{print \$2}'")
 echo "jvpn: CPU en las 5 mediciones: modo usuario $((c1u - c0u)) ticks, modo núcleo (llamadas al sistema, y el trabajo del receptor que corre en la misma CPU por la veth) $((c1s - c0s)) ticks (100 por segundo); memoria residente: $rss kB; binario: $(wc -c < build/jvpn) bytes"
+docker exec $B grep "TUN:" /log 2>/dev/null | tail -4

@@ -93,6 +93,11 @@ public final class Session {
    * La etiqueta se comprueba ANTES de tocar la ventana y de escribir en out.
    */
   public int openInto(byte[] m, int len, byte[] out) {
+    return openInto(m, len, out, 0);
+  }
+
+  /** Como openInto, dejando el contenido en out[outOff..) (para dejar sitio delante a la cabecera de la TUN). */
+  public int openInto(byte[] m, int len, byte[] out, int outOff) {
     if (len < Wg.DATA_HEADER + Wg.TAG || m[0] != 4 || m[1] != 0 || m[2] != 0 || m[3] != 0) return -1;
     if (Wg.getLE32(m, 4) != localIndex) return -1;
     long ctr = Wg.getLE64(m, 8);
@@ -100,7 +105,7 @@ public final class Session {
     if (!fresh(ctr)) return -1;
     for (int i = 0; i < 4; i++) nonceBuf[i] = 0;
     Wg.putLE64(nonceBuf, 4, ctr);
-    int n = ChaCha20Poly1305.openInto(recvKey, nonceBuf, NO_AAD, m, Wg.DATA_HEADER, len - Wg.DATA_HEADER, out, 0);
+    int n = ChaCha20Poly1305.openInto(recvKey, nonceBuf, NO_AAD, m, Wg.DATA_HEADER, len - Wg.DATA_HEADER, out, outOff);
     if (n < 0) return -1;
     mark(ctr);
     return n;

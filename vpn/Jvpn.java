@@ -25,7 +25,7 @@ public class Jvpn {
     System.out.println("órdenes: version, help, genkey, pubkey ARCHIVO, selftest, bench, up, probe, listen, cookie-probe");
     System.out.println("  genkey                      escribe una clave privada nueva (base64, como «wg genkey»)");
     System.out.println("  pubkey ARCHIVO              escribe la clave pública de la privada que hay en ARCHIVO");
-    System.out.println("  up CONFIG --tun NOMBRE [--user UID] [--persist] [--force-cookies] [-v]");
+    System.out.println("  up CONFIG --tun NOMBRE [--user UID] [--persist] [--gso] [--force-cookies] [-v]");
     System.out.println("      túnel con varios pares entre la interfaz TUN y UDP; CONFIG es un subconjunto del formato de wg-quick (IPv4) con permisos 0600; hace falta CAP_NET_ADMIN para crear la TUN y --user suelta los privilegios después");
     System.out.println("  probe ARCHIVO PUB_PAR IPv4:PUERTO ORIGEN DESTINO [N]   apretón de manos con el par y N pings (ICMP) por el túnel de ORIGEN a DESTINO");
     System.out.println("  listen ARCHIVO PUB_PAR PUERTO DIRECCION [N]             responde apretones de manos y contesta N pings dirigidos a DIRECCION (0 = sin fin)");
@@ -109,10 +109,12 @@ public class Jvpn {
     int uid = -1;
     long max = 0;
     boolean persist = false;
+    boolean gsoOn = false;
     Tunnel t = new Tunnel();
     for (int i = 2; i < a.length; i++) {
       if (a[i].equals("-v")) t.verbose = true;
       else if (a[i].equals("--persist")) persist = true;
+      else if (a[i].equals("--gso")) gsoOn = true;
       else if (a[i].equals("--force-cookies")) t.forceCookies = true;
       else if (i + 1 >= a.length) bad("falta el valor de " + a[i]);
       else if (a[i].equals("--tun")) tunName = a[++i];
@@ -143,8 +145,14 @@ public class Jvpn {
     t.setup(c);
     t.udp = Udp.bind(0, c.listenPort, false);
     if (t.udp < 0) bad("no se pudo abrir el socket UDP (error " + (-t.udp) + ")");
-    t.tun = Tun.open(tunName);
+    t.tun = Tun.open(tunName, gsoOn);
     if (t.tun < 0) bad("no se pudo crear la interfaz TUN «" + tunName + "» (error " + (-t.tun) + "; hace falta CAP_NET_ADMIN y /dev/net/tun)");
+    if (gsoOn) {
+      t.vnet = true;
+      t.rxOff = Gso.HDR;
+      int off = Tun.setOffload(t.tun, Tun.F_CSUM | Tun.F_TSO4);
+      if (off < 0) System.out.println(NAME + ": sin ayudas de segmentación en la TUN (error " + (-off) + "); se sigue con paquetes sueltos");
+    }
     boolean root = Sys.syscall(Os.GETUID) == 0;
     if (c.fwmark != 0) {
       if (Udp.setMark(t.udp, c.fwmark) < 0) bad("no se pudo poner FwMark " + c.fwmark + " al socket (hace falta CAP_NET_ADMIN)");

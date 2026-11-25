@@ -25,6 +25,7 @@ Cada riesgo tiene: **qué puede pasar**, **cómo se piensa mitigar** y **cómo y
 | R-V17 | **Dónde corre:** en el anfitrión del operador (más superficie y más privilegios) o dentro de la microVM del cliente (más aislamiento). | M | Decidir por escrito antes de V5; por omisión, dentro de la microVM del cliente. | V5: documentar la decisión y probar el aislamiento. | abierto |
 | R-V18 | **Recursos por par:** memoria y tiempo crecen sin tope con miles de pares; tablas de rutas grandes. | M | Memoria por par acotada y medida; tabla de rutas con estructura propia. | V3: 10 000 pares: memoria residente y tiempo de búsqueda por paquete. | abierto |
 | R-V19 | **Registros y privacidad:** guardar IPs y volumen de tráfico por usuario. | M | Sin registros de tráfico por omisión; solo contadores agregados (medición de uso de la nube, `PLAN_MEDICION.md`). | V4: revisar cada línea de registro. | abierto |
+| R-V20 | **`--gso` interpreta cabeceras virtio del núcleo local** (segmentos de hasta 64 KB que se parten en espacio de usuario). | B | Apagado por omisión; la entrada se trata como hostil (17 casos rechazados, 20 000 cabeceras al azar, 20 mutaciones); no acelera en el banco (`AUDITORIA.md` 12). | Si algún día se activa por omisión: fuzz con el núcleo real y un perfilador. | abierto |
 
 ## Riesgos transversales de jelf
 

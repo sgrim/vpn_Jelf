@@ -21,5 +21,6 @@ $(dirname "$0")/tools/wg_oracle.sh > /tmp/jvpn_oracle.txt 2>&1; cat /tmp/jvpn_or
 $(dirname "$0")/tools/ipv6_oracle.sh > /tmp/jvpn_v6.txt 2>&1; cat /tmp/jvpn_v6.txt; grep -q "^FALLA" /tmp/jvpn_v6.txt && bad=1
 $(dirname "$0")/tools/killswitch_oracle.sh > /tmp/jvpn_ks.txt 2>&1; cat /tmp/jvpn_ks.txt; grep -q "^FALLA" /tmp/jvpn_ks.txt && bad=1
 $(dirname "$0")/tools/tun_oracle.sh > /tmp/jvpn_tun.txt 2>&1; cat /tmp/jvpn_tun.txt; grep -q "^FALLA" /tmp/jvpn_tun.txt && bad=1
+JVPN_OPTS="--gso" $(dirname "$0")/tools/tun_oracle.sh > /tmp/jvpn_tun_gso.txt 2>&1; cat /tmp/jvpn_tun_gso.txt; grep -q "^FALLA" /tmp/jvpn_tun_gso.txt && bad=1
 [ -f RIESGOS.md ] && grep -q "^| R-" RIESGOS.md && ok "RIESGOS.md existe y tiene riesgos anotados ($(grep -c '^| R-' RIESGOS.md))" || fail "RIESGOS.md"
 [ $bad = 0 ] && echo "jvpn: todo bien" || { echo "jvpn: HAY FALLOS"; exit 1; }

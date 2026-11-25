@@ -46,7 +46,7 @@ docker exec $B chmod 644 /wg.conf
 out=$(docker exec $B timeout 5 /jvpn up /wg.conf --tun jt0 --user 65534 2>&1); rc=$?
 [ $rc -ne 0 ] && echo "$out" | grep -q "chmod 600" && ok "una configuración con claves privadas legible por otros se rechaza (dice «chmod 600»)" || fail "permisos de la configuración: rc=$rc $out"
 docker exec $B chmod 600 /wg.conf
-start_jvpn() { docker exec -d $B sh -c "/jvpn up /wg.conf --tun jt0 --user 65534 $1 -v > /log 2>&1"; }
+start_jvpn() { docker exec -d $B sh -c "/jvpn up /wg.conf --tun jt0 --user 65534 $1 $JVPN_OPTS -v > /log 2>&1"; }
 wait_up() { i=0; while [ $i -lt 30 ] && ! docker exec $B grep -q "privilegios soltados" /log 2>/dev/null; do sleep 0.3; i=$((i+1)); done; docker exec $B sh -c "ip addr add 10.9.0.2/24 dev jt0 && ip addr add 10.9.1.2/24 dev jt0 && ip link set jt0 up mtu 1420"; }
 start_jvpn ""
 wait_up
@@ -70,6 +70,13 @@ docker exec $A2 sh -c "head -c 20000000 /dev/urandom > /tx; sha256sum /tx | cut 
 sleep 2
 s1=$(docker exec $A2 cat /tx.sum); s2=$(docker exec $B sh -c "sha256sum /rx | cut -d' ' -f1")
 [ "$s1" = "$s2" ] && [ -n "$s1" ] && ok "20 MB por TCP desde el par 2 llegan idénticos (sha256 coincide; MTU 1420)" || fail "TCP: $s1 / $s2"
+# y en el otro sentido: 20 MB que SALEN de jvpn (con --gso, el núcleo los entrega en segmentos grandes que jvpn parte y a los que completa las sumas)
+docker exec -d $A2 sh -c "nc -l -p 5002 > /rx2"
+sleep 1
+docker exec $B sh -c "head -c 20000000 /dev/urandom > /tx2; sha256sum /tx2 | cut -d' ' -f1 > /tx2.sum; nc -w 3 10.9.1.1 5002 < /tx2"
+sleep 2
+s1=$(docker exec $B cat /tx2.sum); s2=$(docker exec $A2 sh -c "sha256sum /rx2 | cut -d' ' -f1")
+[ "$s1" = "$s2" ] && [ -n "$s1" ] && ok "20 MB por TCP que SALEN de jvpn hacia el par 2 llegan idénticos (sha256 coincide; MTU 1420$([ -n "$JVPN_OPTS" ] && echo "; opciones: $JVPN_OPTS"))" || fail "TCP de salida: $s1 / $s2"
 # suplantación: A envía con origen 10.9.0.77, que jvpn NO permite para A (solo 10.9.0.1/32)
 rx0=$(docker exec $B sh -c "cat /sys/class/net/jt0/statistics/rx_packets")
 docker exec $A ping -c 2 -W 2 -I 10.9.0.77 10.9.0.2 > /dev/null 2>&1

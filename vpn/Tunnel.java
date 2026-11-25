@@ -49,6 +49,16 @@ public final class Tunnel {
   final byte[][] txPool = new byte[Udp.BATCH][POOL];
   final byte[][] rxPool = new byte[Udp.BATCH][POOL];
   final byte[] rxPlain = new byte[65664];
+  boolean vnet; // la TUN lleva delante de cada paquete la cabecera virtio_net_hdr (Gso.HDR bytes): lo que se lee puede venir sin partir y sin sumas de control
+  int rxOff; // dónde deja el paquete descifrado: Gso.HDR con vnet (los ceros de delante son la cabecera que exige escribir), 0 si no
+  final Gso gso = new Gso();
+  final byte[] seg = new byte[65664];
+  final byte[] tbuf = new byte[65664];
+  long tunReads; // estadísticas del camino de la TUN (se muestran con -v cada 2 s)
+  long tunPackets;
+  long udpCalls;
+  long udpPackets;
+  long lastStat;
   int peerCount;
   byte[] sPub;
   Cookies cookies = new Cookies();
@@ -85,9 +95,14 @@ public final class Tunnel {
 
   /** El largo total de un paquete IPv4 bien formado en p[0..len), o -1. */
   static int ipv4Length(byte[] p, int len) {
-    if (len < 20 || (p[0] & 0xf0) != 0x40 || (p[0] & 15) < 5) return -1;
-    int total = ((p[2] & 255) << 8) | (p[3] & 255);
-    if (total < (p[0] & 15) * 4 || total > len) return -1;
+    return ipv4Length(p, 0, len);
+  }
+
+  /** Lo mismo con el paquete en p[off..off+len). */
+  static int ipv4Length(byte[] p, int off, int len) {
+    if (len < 20 || (p[off] & 0xf0) != 0x40 || (p[off] & 15) < 5) return -1;
+    int total = ((p[off + 2] & 255) << 8) | (p[off + 3] & 255);
+    if (total < (p[off] & 15) * 4 || total > len) return -1;
     return total;
   }
 
@@ -268,8 +283,8 @@ public final class Tunnel {
         return;
       }
       int pl = -1;
-      if (p.cur != null && p.cur.localIndex == Wg.getLE32(buf, 4) && now - p.curSince < REJECT_AFTER_MS + 30000) pl = p.cur.openInto(buf, n, rxPlain);
-      else if (p.prev != null && p.prev.localIndex == Wg.getLE32(buf, 4)) pl = p.prev.openInto(buf, n, rxPlain);
+      if (p.cur != null && p.cur.localIndex == Wg.getLE32(buf, 4) && now - p.curSince < REJECT_AFTER_MS + 30000) pl = p.cur.openInto(buf, n, rxPlain, rxOff);
+      else if (p.prev != null && p.prev.localIndex == Wg.getLE32(buf, 4)) pl = p.prev.openInto(buf, n, rxPlain, rxOff);
       if (pl < 0) {
         log("mensaje de datos que no abre (" + n + " bytes)");
         p.dropped++;
@@ -279,13 +294,13 @@ public final class Tunnel {
       p.port = srcPort;
       p.haveEndpoint = true;
       if (pl == 0) return; // keepalive
-      int total = ipv4Length(rxPlain, pl);
-      if (total < 0 || !allowed(p, ipAt(rxPlain, 12))) {
-        log("descartado: paquete de " + pl + " bytes" + (total < 0 ? " mal formado" : " con origen " + Ip.str(ipAt(rxPlain, 12)) + " fuera de las rutas del par"));
+      int total = ipv4Length(rxPlain, rxOff, pl);
+      if (total < 0 || !allowed(p, ipAt(rxPlain, rxOff + 12))) {
+        log("descartado: paquete de " + pl + " bytes" + (total < 0 ? " mal formado" : " con origen " + Ip.str(ipAt(rxPlain, rxOff + 12)) + " fuera de las rutas del par"));
         p.dropped++; // origen fuera de las rutas de ESTE par: suplantación
         return;
       }
-      Tun.write(tun, rxPlain, 0, total);
+      Tun.write(tun, rxPlain, 0, rxOff + total);
       p.rxPackets++;
     }
   }
@@ -332,7 +347,6 @@ public final class Tunnel {
     Poller poll = new Poller(4);
     poll.add(udp, Net.IN);
     poll.add(tun, Net.IN);
-    byte[] tbuf = new byte[65536];
     long now = System.currentTimeMillis();
     for (int i = 0; i < peerCount; i++) if (peers[i].haveEndpoint) startHandshake(peers[i], now);
     for (;;) {
@@ -344,6 +358,8 @@ public final class Tunnel {
           for (int k = 0; k < 2; k++) { // se vacía el socket por lotes de hasta 32 datagramas con una llamada, con tope para no dejar sin atender la TUN
             int r = Udp.recvBatch(udp, rxPool, Udp.BATCH);
             if (r <= 0) break;
+            udpCalls++;
+            udpPackets += r;
             for (int j = 0; j < r; j++) onUdp(rxPool[j], Udp.batchLen[j], now, Udp.batchIp[j], Udp.batchPort[j]);
             if (r < Udp.BATCH) break;
           }
@@ -352,10 +368,23 @@ public final class Tunnel {
           for (int k = 0; k < 64; k++) {
             int r = Tun.read(tun, tbuf, 0, tbuf.length);
             if (r <= 0) break;
-            onTun(tbuf, r, now);
+            tunReads++;
+            if (!vnet) {
+              onTun(tbuf, r, now);
+            } else if (gso.begin(tbuf, r)) {
+              int sl;
+              while ((sl = gso.next(seg)) > 0) {
+                tunPackets++;
+                onTun(seg, sl, now);
+              }
+            }
           }
           flushSend();
         }
+      }
+      if (verbose && now - lastStat >= 2000) {
+        if (lastStat != 0) log("TUN: " + tunReads + " lecturas, " + tunPackets + " paquetes partidos; UDP: " + udpCalls + " lotes, " + udpPackets + " datagramas");
+        lastStat = now;
       }
       timers(now);
       if (maxPackets > 0 && delivered() >= maxPackets) return;

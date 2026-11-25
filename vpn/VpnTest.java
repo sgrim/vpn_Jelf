@@ -516,6 +516,256 @@ public final class VpnTest {
   }
 
   /** Mide en memoria (sin red): cifrar y abrir paquetes de un tamaño dado, y apretones de manos por segundo. */
+  // ------------------------------------------------------------------ Gso: partir segmentos TCP grandes y completar sumas de control
+
+  static long gseed = 0x2545F4914F6CDD1DL;
+
+  static int grnd(int n) {
+    gseed ^= gseed << 13;
+    gseed ^= gseed >>> 7;
+    gseed ^= gseed << 17;
+    return (int) ((gseed >>> 33) % n);
+  }
+
+  static void put16le(byte[] b, int o, int v) {
+    b[o] = (byte) v;
+    b[o + 1] = (byte) (v >> 8);
+  }
+
+  /** Lo que lee la TUN con virtio_net_hdr: un segmento TCP de IPv4 sin partir, con SUMAS BASURA (hay que recalcularlas). */
+  static byte[] tso(int payload, int mss, int optLen, int tcpFlags, int seq, int id) {
+    int hl = 40 + optLen;
+    byte[] b = new byte[Gso.HDR + hl + payload];
+    b[0] = 1;
+    b[1] = 1;
+    put16le(b, 2, hl);
+    put16le(b, 4, mss);
+    put16le(b, 6, 20);
+    put16le(b, 8, 16);
+    int p = Gso.HDR;
+    b[p] = 0x45;
+    Ip.put16(b, p + 2, hl + payload);
+    Ip.put16(b, p + 4, id);
+    Ip.put16(b, p + 6, 0x4000);
+    b[p + 8] = 64;
+    b[p + 9] = 6;
+    Ip.put32(b, p + 12, 0x0a090002);
+    Ip.put32(b, p + 16, 0x0a090001);
+    Ip.put16(b, p + 10, 0x1234);
+    Ip.put16(b, p + 20, 40000);
+    Ip.put16(b, p + 22, 5201);
+    Ip.put32(b, p + 24, seq);
+    Ip.put32(b, p + 28, 777);
+    b[p + 32] = (byte) ((hl - 20) / 4 << 4);
+    b[p + 33] = (byte) tcpFlags;
+    Ip.put16(b, p + 34, 4096);
+    Ip.put16(b, p + 36, 0x4321);
+    for (int i = 0; i < optLen; i++) b[p + 40 + i] = (byte) (i + 1);
+    for (int i = 0; i < payload; i++) b[Gso.HDR + hl + i] = (byte) (i * 31 + (i >> 8));
+    return b;
+  }
+
+  /** ¿Es un paquete IPv4/TCP con las dos sumas de control bien? Verifica con Ip.checksum (byte a byte), que es otra implementación. */
+  static boolean tcpValid(byte[] p, int len) {
+    if (len < 40 || (p[0] & 0xf0) != 0x40) return false;
+    int ihl = (p[0] & 15) * 4;
+    if (Ip.checksum(p, 0, ihl) != 0) return false;
+    int tl = len - ihl;
+    byte[] ps = new byte[12 + tl];
+    for (int i = 0; i < 8; i++) ps[i] = p[12 + i];
+    ps[9] = 6;
+    Ip.put16(ps, 10, tl);
+    for (int i = 0; i < tl; i++) ps[12 + i] = p[ihl + i];
+    return Ip.checksum(ps, 0, ps.length) == 0;
+  }
+
+  static boolean gsoSplit() {
+    Gso g = new Gso();
+    byte[] out = new byte[65664];
+    int[][] cases = {{1, 1400, 0}, {1399, 1400, 0}, {1400, 1400, 0}, {1401, 1400, 0}, {4200, 1400, 0}, {4217, 1400, 0}, {4217, 1400, 12}, {65000, 1400, 12}, {65000, 536, 0}, {61000, 1460, 20}, {0, 1400, 0}, {7, 3, 0}, {10001, 1, 0}};
+    for (int c = 0; c < cases.length; c++) {
+      int pay = cases[c][0];
+      int mss = cases[c][1];
+      int opt = cases[c][2];
+      int seq0 = c == 3 ? -300 : 1000 + c; // uno cruza el 2^32
+      int id0 = c == 4 ? 65534 : 100 + c; // uno cruza el 2^16
+      byte[] in = tso(pay, mss, opt, 0x19, seq0, id0); // ACK | PSH | FIN
+      if (!g.begin(in, in.length)) return false;
+      int hl = 40 + opt;
+      int segs = pay == 0 ? 1 : (pay + mss - 1) / mss;
+      int got = 0;
+      int sl;
+      int i = 0;
+      while ((sl = g.next(out)) > 0) {
+        int expect = i == segs - 1 ? hl + (pay - i * mss) : hl + mss;
+        if (pay == 0) expect = hl;
+        if (sl != expect || !tcpValid(out, sl)) return false;
+        if (Gso.get16(out, 2) != sl || Gso.get16(out, 4) != ((id0 + i) & 0xffff)) return false;
+        if (Bytes.getIntBE(out, 24) != seq0 + i * mss) return false;
+        int fl = out[33] & 255;
+        boolean last = i == segs - 1;
+        if ((fl & 0x10) == 0 || (last && (fl & 9) != 9) || (!last && (fl & 9) != 0)) return false;
+        for (int k = 0; k < sl - hl; k++) if (out[hl + k] != in[Gso.HDR + hl + got + k]) return false;
+        for (int k = 0; k < opt; k++) if (out[40 + k] != (byte) (k + 1)) return false;
+        got += sl - hl;
+        i++;
+      }
+      if (i != segs || got != pay) return false;
+      if (g.next(out) != 0) return false; // y sigue sin haber más
+    }
+    return true;
+  }
+
+  static boolean gsoIgnoresTail() {
+    Gso g = new Gso();
+    byte[] out = new byte[65664];
+    byte[] in = tso(3000, 1400, 0, 0x10, 5, 9);
+    byte[] longer = new byte[in.length + 40]; // el núcleo no deja nada detrás, pero lo que sobra del largo IP no es de datos
+    for (int i = 0; i < in.length; i++) longer[i] = in[i];
+    for (int i = in.length; i < longer.length; i++) longer[i] = (byte) 0xee;
+    if (!g.begin(longer, longer.length)) return false;
+    int sum = 0;
+    int sl;
+    while ((sl = g.next(out)) > 0) {
+      if (!tcpValid(out, sl)) return false;
+      sum += sl - 40;
+    }
+    return sum == 3000;
+  }
+
+  /** Un paquete suelto con la suma sin completar (UDP o TCP): queda con la suma que verifica. */
+  static boolean gsoNeedsCsum() {
+    Gso g = new Gso();
+    byte[] out = new byte[65664];
+    for (int pay = 0; pay < 60; pay += 7) {
+      for (int proto = 6; proto <= 17; proto += 11) {
+        int th = proto == 6 ? 20 : 8;
+        int tl = th + pay;
+        byte[] b = new byte[Gso.HDR + 20 + tl];
+        b[0] = 1;
+        put16le(b, 6, 20);
+        put16le(b, 8, proto == 6 ? 16 : 6);
+        int p = Gso.HDR;
+        b[p] = 0x45;
+        Ip.put16(b, p + 2, 20 + tl);
+        b[p + 8] = 64;
+        b[p + 9] = (byte) proto;
+        Ip.put32(b, p + 12, 0xc0a80001);
+        Ip.put32(b, p + 16, 0xc0a80002);
+        Ip.put16(b, p + 10, Ip.checksum(b, p, 20));
+        if (proto == 6) b[p + 32] = 0x50;
+        else Ip.put16(b, p + 24, tl);
+        for (int i = 0; i < pay; i++) b[p + 20 + th + i] = (byte) (i * 13 + 5);
+        // el núcleo deja en el campo la suma del pseudoencabezado sin complementar
+        byte[] ps = new byte[12];
+        for (int i = 0; i < 8; i++) ps[i] = b[p + 12 + i];
+        ps[9] = (byte) proto;
+        Ip.put16(ps, 10, tl);
+        int pseudo = ~Ip.checksum(ps, 0, 12) & 0xffff;
+        Ip.put16(b, p + 20 + (proto == 6 ? 16 : 6), pseudo);
+        if (!g.begin(b, b.length)) return false;
+        int sl = g.next(out);
+        if (sl != 20 + tl || g.next(out) != 0) return false;
+        byte[] full = new byte[12 + tl];
+        for (int i = 0; i < 8; i++) full[i] = out[12 + i];
+        full[9] = (byte) proto;
+        Ip.put16(full, 10, tl);
+        for (int i = 0; i < tl; i++) full[12 + i] = out[20 + i];
+        if (Ip.checksum(full, 0, full.length) != 0) return false;
+        if (proto == 17 && pay >= 2 && pay % 2 == 0) { // una suma que da exactamente cero: en UDP se manda como 0xffff (cero significa «sin suma»)
+          Ip.put16(b, p + 20 + th + pay - 2, 0); // con la última palabra a cero, la suma completa es c0; poner c0 en esa palabra hace que todo sume 0xffff
+          if (!g.begin(b, b.length) || g.next(out) != 20 + tl) return false;
+          int c0 = Gso.get16(out, 26);
+          Ip.put16(b, p + 20 + th + pay - 2, c0);
+          if (!g.begin(b, b.length) || g.next(out) != 20 + tl || Gso.get16(out, 26) != 0xffff) return false;
+          for (int i = 0; i < tl; i++) full[12 + i] = out[20 + i];
+          if (Ip.checksum(full, 0, full.length) != 0) return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  static boolean gsoRejects() {
+    Gso g = new Gso();
+    byte[] ok = tso(3000, 1400, 0, 0x10, 5, 9);
+    if (!g.begin(ok, ok.length)) return false;
+    byte[] b;
+    b = tso(3000, 1400, 0, 0x10, 5, 9);
+    b[1] = 4; // UDP GSO: no se pidió
+    if (g.begin(b, b.length)) return false;
+    b = tso(3000, 1400, 0, 0x10, 5, 9);
+    b[1] = 3; // TCP sobre IPv6
+    if (g.begin(b, b.length)) return false;
+    b = tso(3000, 1400, 0, 0x10, 5, 9);
+    put16le(b, 4, 0); // gso_size 0
+    if (g.begin(b, b.length)) return false;
+    b = tso(3000, 1400, 0, 0x10, 5, 9);
+    put16le(b, 4, 65535); // un segmento que no cabe en un paquete IP
+    if (g.begin(b, b.length)) return false;
+    b = tso(3000, 1400, 0, 0x10, 5, 9);
+    put16le(b, 2, 4000); // hdr_len más allá de lo leído
+    if (g.begin(b, b.length)) return false;
+    b = tso(3000, 1400, 0, 0x10, 5, 9);
+    put16le(b, 2, 52); // hdr_len que no cuadra con el desplazamiento de datos de TCP
+    if (g.begin(b, b.length)) return false;
+    b = tso(3000, 1400, 0, 0x10, 5, 9);
+    put16le(b, 2, 20); // sin sitio para TCP
+    if (g.begin(b, b.length)) return false;
+    b = tso(3000, 1400, 0, 0x10, 5, 9);
+    b[Gso.HDR] = 0x65; // IPv6/versión errónea
+    if (g.begin(b, b.length)) return false;
+    b = tso(3000, 1400, 0, 0x10, 5, 9);
+    b[Gso.HDR + 9] = 17; // no es TCP
+    if (g.begin(b, b.length)) return false;
+    b = tso(3000, 1400, 0, 0x10, 5, 9);
+    b[Gso.HDR] = 0x4f; // cabecera IP de 60 bytes con hdr_len de 40
+    if (g.begin(b, b.length)) return false;
+    b = tso(3000, 1400, 0, 0x10, 5, 9);
+    b[Gso.HDR + 32] = 0x40; // desplazamiento de datos de 16 bytes
+    if (g.begin(b, b.length)) return false;
+    byte[] sh = tso(0, 1400, 0, 0x10, 5, 9);
+    if (g.begin(sh, 30) || g.begin(sh, 0) || g.begin(sh, Gso.HDR + 19)) return false; // truncado
+    b = new byte[Gso.HDR + 30];
+    b[0] = 1;
+    put16le(b, 6, 40); // csum_start fuera del paquete
+    put16le(b, 8, 2);
+    b[Gso.HDR] = 0x45;
+    if (g.begin(b, b.length)) return false;
+    put16le(b, 6, 20);
+    put16le(b, 8, 9); // el campo de la suma se sale
+    if (g.begin(b, b.length)) return false;
+    return true;
+  }
+
+  /** 20000 cabeceras de virtio y de IP/TCP con bytes al azar: sin excepciones, sin paquete mayor de 65535 y sin bucles infinitos. */
+  static boolean gsoFuzz() {
+    Gso g = new Gso();
+    byte[] out = new byte[65664];
+    int accepted = 0;
+    for (int t = 0; t < 20000; t++) {
+      int pay = grnd(4) == 0 ? grnd(30000) : grnd(3000);
+      byte[] in = tso(pay, 1 + grnd(1500), grnd(3) == 0 ? 4 * grnd(11) : 0, grnd(256), grnd(1 << 30), grnd(65536));
+      int muts = 1 + grnd(4);
+      for (int m = 0; m < muts; m++) {
+        int where = grnd(3) == 0 ? grnd(in.length) : grnd(Gso.HDR + 40);
+        if (where < in.length) in[where] = (byte) grnd(256);
+      }
+      int n = grnd(8) == 0 ? grnd(in.length + 1) : in.length;
+      if (!g.begin(in, n)) continue;
+      accepted++;
+      int sl;
+      int count = 0;
+      long data = 0;
+      while ((sl = g.next(out)) > 0) {
+        if (sl > 65535 || sl < 40 || ++count > 70000) return false;
+        data += sl;
+      }
+      if (data > 65535L * 70 || data > (long) (n + 70000) * 70000) return false;
+    }
+    return accepted > 1000; // si todo se rechazara, la prueba no probaría nada
+  }
+
   public static void bench(int size) {
     Handshake[] p = pair(null);
     Session[] s = full(p[0], p[1]);
@@ -577,6 +827,11 @@ public final class VpnTest {
     check("CONFIGURACIÓN: se leen pares, rutas, endpoint y keepalive; Address/DNS se avisan y no se aplican; 20 configuraciones inválidas (sin claves, IPv6, bits de host, nombres de host, duplicados, rutas repetidas...) se rechazan", configParsing());
     check("ENRUTAMIENTO por clave criptográfica: gana la ruta más larga entre varios pares, la ruta por omisión recoge el resto, sin ruta se descarta, y el origen de un paquete debe estar en las rutas de ESE par", routing());
     check("VARIOS PARES: la clave estática descifrada elige al par; otro par configurado con el mismo dispositivo rechaza la iniciación ajena (comprobación obligatoria)", multiPeerHandshake());
+    check("GSO: un segmento TCP de hasta 64 KB se parte en paquetes de gso_size (13 casos, con opciones, a punto de cruzar 2^32 de secuencia y 2^16 de identificador): largos, secuencia, identificador, FIN y PSH solo en el último, datos y las DOS sumas de control correctas (verificadas con otra implementación)", gsoSplit());
+    check("GSO: lo que sobra detrás del largo IP no se trata como datos", gsoIgnoresTail());
+    check("GSO: un paquete suelto con la suma sin completar (UDP y TCP, 9 largos) queda con la suma que verifica", gsoNeedsCsum());
+    check("GSO hostil: otro tipo de GSO, gso_size 0 o enorme, hdr_len imposible o que no cuadra con TCP, no IPv4, no TCP, opciones IP, truncados y campos de suma fuera del paquete se descartan", gsoRejects());
+    check("GSO fuzz: 20000 cabeceras con bytes al azar no dan excepción, paquetes mayores de 65535 ni bucles", gsoFuzz());
     System.out.println("jvpn selftest: " + (total - bad) + " de " + total);
     return bad == 0;
   }
