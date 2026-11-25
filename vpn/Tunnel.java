@@ -20,7 +20,6 @@ public final class Tunnel {
   static final long REJECT_AFTER_MS = 180000;
   static final long REKEY_TIMEOUT_MS = 5000;
   static final int MAX_ATTEMPTS = 3;
-  static final int MAX_INITIATIONS_PER_SEC = 20;
 
   /** El estado de un par. */
   static final class Peer {
@@ -70,8 +69,7 @@ public final class Tunnel {
   int tun;
   boolean verbose;
   boolean forceCookies;
-  long secStart;
-  int secCount;
+  final InitLimiter limiter = new InitLimiter();
 
   void log(String s) {
     if (verbose) System.err.println("jvpn: " + s);
@@ -225,16 +223,15 @@ public final class Tunnel {
   void onInitiation(byte[] buf, int n, long now, int srcIp, int srcPort) {
     Handshake any = peers[0].hs;
     if (!any.mac1Ok(buf, n)) return; // lo barato primero: sin MAC1 válido no se cuenta ni se gasta nada
-    if (now - secStart >= 1000) {
-      secStart = now;
-      secCount = 0;
-    }
-    if (++secCount > MAX_INITIATIONS_PER_SEC) return; // tope duro del dispositivo: cada iniciación cuesta curvas elípticas
-    boolean load = forceCookies || secCount > MAX_INITIATIONS_PER_SEC / 4;
+    boolean load = limiter.arrive(now) || forceCookies; // barato: solo cuenta la llegada; el trabajo caro tiene sus propios presupuestos (InitLimiter)
     if (load && !cookies.mac2Valid(buf, 132, srcIp, srcPort, now)) {
       byte[] r = cookies.reply(buf, 116, srcIp, srcPort, sPub, now);
       Udp.sendTo(udp, srcIp, srcPort, r, 0, Cookies.REPLY);
       log("bajo carga: respuesta de cookie enviada");
+      return;
+    }
+    if (!limiter.admit(srcIp, now)) { // la IP ya está probada (MAC2) si había carga: aquí se limita POR ORIGEN y, al final, en total
+      log("iniciación descartada: " + (limiter.lastReason == InitLimiter.DROP_SOURCE ? "demasiadas de ese origen" : "tope global de iniciaciones"));
       return;
     }
     Handshake.Init in = any.openInitiation(buf, n);

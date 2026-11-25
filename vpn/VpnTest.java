@@ -766,6 +766,88 @@ public final class VpnTest {
     return accepted > 1000; // si todo se rechazara, la prueba no probaría nada
   }
 
+  // ------------------------------------------------------------------ InitLimiter: los tres presupuestos de las iniciaciones
+
+  static boolean limiterBasics() {
+    InitLimiter l = new InitLimiter();
+    long t = 1000000;
+    boolean good = true;
+    // sin carga: pocas llegadas no piden cookie; con muchas, sí
+    for (int i = 0; i < InitLimiter.LOAD_ARRIVALS; i++) if (l.arrive(t)) good = false;
+    if (!l.arrive(t)) good = false; // la siguiente ya es «bajo carga»
+    // la ventana se reinicia al pasar un segundo, y también si el reloj va hacia atrás
+    if (l.arrive(t + 1000)) good = false;
+    for (int i = 0; i < InitLimiter.LOAD_ARRIVALS + 3; i++) l.arrive(t + 1000);
+    if (!l.arrive(t + 1000)) good = false;
+    if (l.arrive(t + 500)) good = false; // el reloj retrocedió: ventana nueva
+    return good;
+  }
+
+  /** Una sola IP que inunda se queda sin fichas (ráfaga de BURST) y NO toca el presupuesto de las demás. */
+  static boolean limiterPerSource() {
+    InitLimiter l = new InitLimiter();
+    long t = 5000000;
+    int a = 0x0a000001;
+    int b = 0x0a000002;
+    int okA = 0;
+    for (int i = 0; i < 100; i++) if (l.admit(a, t)) okA++;
+    boolean srcReason = l.lastReason == InitLimiter.DROP_SOURCE;
+    boolean otherStill = l.admit(b, t) && l.admit(b, t); // otra IP sigue pasando
+    // reposición: tras 500 ms (2 fichas por segundo) vuelve a pasar UNA, no dos
+    int again = 0;
+    for (int i = 0; i < 5; i++) if (l.admit(a, t + 500)) again++;
+    // tras mucho tiempo se llena hasta la ráfaga y no más
+    int full = 0;
+    for (int i = 0; i < 20; i++) if (l.admit(a, t + 600000)) full++;
+    return okA == InitLimiter.BURST && srcReason && otherStill && again == 1 && full == InitLimiter.BURST;
+  }
+
+  /** Un atacante que falsifica orígenes (sin MAC2) nunca llega a admit: no gasta ni el cubo ni el tope global; y muchas IPs reales chocan con el tope global, que se repone cada segundo. */
+  static boolean limiterGlobalAndSpoof() {
+    InitLimiter l = new InitLimiter();
+    long t = 9000000;
+    // 5000 llegadas falsificadas: todas «bajo carga» (exigen MAC2) y ninguna se admite aquí
+    int loaded = 0;
+    for (int i = 0; i < 5000; i++) if (l.arrive(t)) loaded++;
+    boolean spoofNoCost = loaded >= 4900;
+    // el cliente legítimo, con su MAC2, sigue pasando tras la inundación
+    boolean legit = l.admit(0x0a0a0a0a, t);
+    // 100 IPs distintas reales: solo GLOBAL_PER_SEC en total (ya hay 1 admitida)
+    int okBot = 0;
+    for (int i = 0; i < 100; i++) if (l.admit(0x0b000000 + i * 1237, t)) okBot++;
+    boolean globalReason = l.lastReason == InitLimiter.DROP_GLOBAL;
+    int next = 0; // en el segundo siguiente se repone
+    for (int i = 0; i < 100; i++) if (l.admit(0x0c000000 + i * 977, t + 1000)) next++;
+    return spoofNoCost && legit && okBot == InitLimiter.GLOBAL_PER_SEC - 1 && globalReason && next == InitLimiter.GLOBAL_PER_SEC;
+  }
+
+  /** La tabla es de tamaño fijo: dos IPs con la misma casilla se reemplazan sin romper nada, y las cuentas no se desbordan con un reloj raro. */
+  static boolean limiterTable() {
+    InitLimiter l = new InitLimiter();
+    int a = 0x01020304;
+    int b = a;
+    for (int x = 1; x < 100000; x++) {
+      int c = a + x * 7919;
+      if (InitLimiter.slotOf(c) == InitLimiter.slotOf(a) && c != a) {
+        b = c;
+        break;
+      }
+    }
+    boolean found = b != a;
+    long t = 100;
+    int n1 = 0;
+    for (int i = 0; i < 10; i++) if (l.admit(a, t)) n1++; // agota a
+    boolean evict = l.admit(b, t); // b reemplaza a: empieza lleno
+    boolean back = l.admit(a, t); // a vuelve a reemplazar a b: empieza lleno otra vez (límite documentado: quien tiene MUCHAS IPs lo elude)
+    // tiempos extremos: sin desbordar ni ir a negativo
+    InitLimiter l2 = new InitLimiter();
+    l2.admit(a, 5);
+    int count = 0;
+    for (int i = 0; i < 10; i++) if (l2.admit(a, Long.MAX_VALUE - 7)) count++; // salto enorme hacia delante: el cubo se llena (ráfaga) y no más
+    boolean early = l2.admit(a, 1); // el reloj retrocede mucho: sin fichas nuevas (el cubo estaba vacío) y sin excepción
+    return found && n1 == InitLimiter.BURST && evict && back && count == InitLimiter.BURST && !early;
+  }
+
   public static void bench(int size) {
     Handshake[] p = pair(null);
     Session[] s = full(p[0], p[1]);
@@ -832,6 +914,10 @@ public final class VpnTest {
     check("GSO: un paquete suelto con la suma sin completar (UDP y TCP, 9 largos) queda con la suma que verifica", gsoNeedsCsum());
     check("GSO hostil: otro tipo de GSO, gso_size 0 o enorme, hdr_len imposible o que no cuadra con TCP, no IPv4, no TCP, opciones IP, truncados y campos de suma fuera del paquete se descartan", gsoRejects());
     check("GSO fuzz: 20000 cabeceras con bytes al azar no dan excepción, paquetes mayores de 65535 ni bucles", gsoFuzz());
+    check("LÍMITE de iniciaciones (1): las llegadas piden cookie (MAC2) pasado el umbral, la ventana se reinicia cada segundo y también si el reloj retrocede", limiterBasics());
+    check("LÍMITE de iniciaciones (2): una IP que inunda se queda sin fichas tras la ráfaga y NO toca a las demás; la reposición es de 2 por segundo y nunca pasa de la ráfaga", limiterPerSource());
+    check("LÍMITE de iniciaciones (3): 5000 llegadas con orígenes falsificados (sin MAC2) no gastan nada y el cliente legítimo sigue pasando; 100 IPs reales topan con el límite global, que se repone cada segundo", limiterGlobalAndSpoof());
+    check("LÍMITE de iniciaciones (4): dos IPs en la misma casilla de la tabla fija se reemplazan sin romper nada y los relojes extremos no desbordan", limiterTable());
     System.out.println("jvpn selftest: " + (total - bad) + " de " + total);
     return bad == 0;
   }

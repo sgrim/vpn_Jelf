@@ -7,5 +7,5 @@ JELF="${JELF:-../../../compiladorELF/1.0.1/src/jelf.sh}"
 mkdir -p build
 EDGE=../../../edge_Jelf/1.0.1/src/crypto # la criptografía de edge_Jelf: se compila junto, no se copia
 EDGEFILES="$EDGE/Blake2s.java $EDGE/ChaCha20.java $EDGE/Poly1305.java $EDGE/ChaCha20Poly1305.java $EDGE/XChaCha20Poly1305.java $EDGE/Fe.java $EDGE/FeMul.java $EDGE/X25519.java"
-"$JELF" vpn/Jvpn.java vpn/VpnTest.java vpn/Wg.java vpn/Handshake.java vpn/Session.java vpn/B64.java vpn/Ip.java vpn/Rand.java vpn/Tunnel.java vpn/Cookies.java vpn/Config.java vpn/Gso.java $EDGEFILES -o build/jvpn
+"$JELF" vpn/Jvpn.java vpn/VpnTest.java vpn/Wg.java vpn/Handshake.java vpn/Session.java vpn/B64.java vpn/Ip.java vpn/Rand.java vpn/Tunnel.java vpn/Cookies.java vpn/Config.java vpn/Gso.java vpn/InitLimiter.java $EDGEFILES -o build/jvpn
 "$JELF" ../../../compiladorELF/1.0.1/src/tools/CheckRules.java -o build/CheckRules
