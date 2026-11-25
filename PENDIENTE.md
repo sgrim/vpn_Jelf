@@ -16,7 +16,7 @@ Tamaños relativos: S < M < L < XL. Los riesgos de cada fase y su validación es
 - **Interruptor de seguridad y túnel completo: HECHOS (AUDITORIA.md 6)**; HECHOS también la ventana al arrancar, IPv6 y DNS (AUDITORIA.md 9 y 10); falta que jvpn escriba resolv.conf y un cortafuegos real.
 - Política de rutas IPv4 e IPv6, DNS por el túnel, interruptor si el túnel cae, MTU 1420.
 
-## 4. V3 — rendimiento (L): MEDIDO y rotaciones en una instrucción (AUDITORIA.md 7); faltan recvmmsg/sendmmsg, búfer fijo, ChaCha20 SIMD y trabajadores
+## 4. V3 — rendimiento (L): MEDIDO (AUDITORIA.md 7, 8 y 12; cifras en METRICAS.md); **PENDIENTE DE MEJORAR: el kernel es más rápido (≈ 800 frente a ≈ 300 Mbit/s, jvpn ≈ 38 %)**; GSO probado y sin ganancia; faltan ChaCha20 SIMD, trabajadores, un perfilador y medir en dos máquinas
 - ChaCha20-Poly1305 con SIMD y por lotes, lectura y escritura de varios paquetes, un `Worker` por grupo de pares; banco contra el kernel, `wireguard-go` y BoringTun (Gbit/s, CPU por Gbit, latencia, memoria).
 
 ## 5. V4 — endurecimiento (M)
