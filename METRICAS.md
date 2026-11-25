@@ -40,8 +40,19 @@ Evolución del cifrado: 547 (inicio) → 675 (`Sys.rotl32`) → 962 Mbit/s (búf
 
 ## Por qué importa que sea más lento, y qué falta (PENDIENTE.md, V3)
 
-1. **ChaCha20 con SIMD** (instrucción nueva en los tres emisores): el cifrado escalar da ≈ 940 Mbit/s por núcleo y en el túnel real el techo medido es ≈ 300.
+1. **Entender el modo núcleo (≈ 28 µs por paquete frente a ≈ 14 µs de TODO en el kernel):** es donde está el hueco. ChaCha20 SIMD ahorraría ≈ 5 µs de ≈ 38 (≈ +13 %): `AUDITORIA.md` 13. Falta contar las llamadas al sistema por paquete y quién ejecuta el trabajo del receptor.
 2. **Varios trabajadores** por par: exige repartir el contador de mensajes y la ventana antirrepetición de UN par entre procesos sin memoria compartida; es un rediseño, no un ajuste.
 3. **Un perfilador:** en esta máquina no hay `perf` ni `strace`; sin él no se separa lo que cuesta el receptor de lo que cuesta jvpn.
 4. **Medir en dos máquinas reales** (con una NIC de verdad) para quitar el efecto de que el receptor corra en la misma CPU.
 5. Comparar con `wireguard-go` y BoringTun (no están instalados: no se afirma nada contra ellos).
+
+## Dónde se va el tiempo de un paquete (1 408 bytes, un núcleo; `AUDITORIA.md` 13)
+
+| Parte | µs por paquete |
+|---|---|
+| ChaCha20 (cifrar) | ≈ 6,6 |
+| Poly1305 (etiqueta) | ≈ 3,1 |
+| `sealInto` completo | ≈ 9,8 |
+| Total de CPU de jvpn a ≈ 300 Mbit/s | ≈ 38 |
+| Resto (modo núcleo, receptor en la misma CPU, recolector) | ≈ 28 |
+| Kernel ↔ kernel a ≈ 800 Mbit/s, TODO | ≈ 14 |
