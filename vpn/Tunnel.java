@@ -59,6 +59,10 @@ public final class Tunnel {
   long udpCalls;
   long udpPackets;
   long lastStat;
+  long waits; // vueltas del bucle (epoll_wait)
+  long tunWrites;
+  long sendCalls;
+  long sendPackets;
   int peerCount;
   byte[] sPub;
   Cookies cookies = new Cookies();
@@ -133,7 +137,12 @@ public final class Tunnel {
 
   /** Envía con una sola llamada los datagramas de datos acumulados. */
   void flushSend() {
-    if (Udp.queuedCount() > 0) Udp.sendFlush(udp);
+    int q = Udp.queuedCount();
+    if (q > 0) {
+      sendCalls++;
+      sendPackets += q;
+      Udp.sendFlush(udp);
+    }
   }
 
   void send(Peer p, byte[] m, int len) {
@@ -300,6 +309,7 @@ public final class Tunnel {
         p.dropped++; // origen fuera de las rutas de ESTE par: suplantación
         return;
       }
+      tunWrites++;
       Tun.write(tun, rxPlain, 0, rxOff + total);
       p.rxPackets++;
     }
@@ -350,6 +360,7 @@ public final class Tunnel {
     long now = System.currentTimeMillis();
     for (int i = 0; i < peerCount; i++) if (peers[i].haveEndpoint) startHandshake(peers[i], now);
     for (;;) {
+      waits++;
       int n = poll.await(1000);
       now = System.currentTimeMillis();
       for (int i = 0; i < n; i++) {
@@ -383,7 +394,7 @@ public final class Tunnel {
         }
       }
       if (verbose && now - lastStat >= 2000) {
-        if (lastStat != 0) log("TUN: " + tunReads + " lecturas, " + tunPackets + " paquetes partidos; UDP: " + udpCalls + " lotes, " + udpPackets + " datagramas");
+        if (lastStat != 0) log("TUN: " + tunReads + " lecturas, " + tunPackets + " paquetes partidos, " + tunWrites + " escrituras; UDP: " + udpCalls + " recvmmsg (" + udpPackets + " datagramas), " + sendCalls + " sendmmsg (" + sendPackets + " datagramas); " + waits + " esperas");
         lastStat = now;
       }
       timers(now);

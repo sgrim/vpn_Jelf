@@ -56,3 +56,7 @@ Evolución del cifrado: 547 (inicio) → 675 (`Sys.rotl32`) → 962 Mbit/s (búf
 | Total de CPU de jvpn a ≈ 300 Mbit/s | ≈ 38 |
 | Resto (modo núcleo, receptor en la misma CPU, recolector) | ≈ 28 |
 | Kernel ↔ kernel a ≈ 800 Mbit/s, TODO | ≈ 14 |
+
+## Llamadas al sistema por datagrama de datos (`tools/count_calls.sh`; `AUDITORIA.md` 14)
+
+≈ 1,5 por paquete (1,00 lectura y 0,37 escrituras de la TUN en la subida; 0,46 y 1,00 en la bajada; los lotes de `sendmmsg`/`recvmmsg` y las esperas suman ≈ 0,05). **No es el hueco con el kernel:** el trabajo está en lo que cada llamada hace (copias, envío por la veth, receptor en la misma CPU), y sin perfilador o dos máquinas reales no se puede separar más.
